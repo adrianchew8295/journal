@@ -1,6 +1,8 @@
-import io
+import calendar
 import datetime
 from datetime import timedelta
+import os
+import time
 import numpy as np
 import pandas as pd
 import pytz
@@ -9,374 +11,465 @@ import streamlit as st
 import yfinance as yf
 
 # =====================================================================
-# 1. 核心凭证与页面配置 (Title: 《《癸水(QQQ)》》)
+# 1. 基础配置与凭证锁定
 # =====================================================================
+st.set_page_config(page_title="QQQ 2B与战区同频座舱", page_icon="🎯", layout="wide")
+
 TIINGO_TOKEN = "bcffe3a5cf7eeef085e405cfa4a3e5691b976217"
+TICKER = "QQQ"
+CSV_FILE = "monthly_trade_records.csv"
 
-st.set_page_config(
-    page_title="《《癸水(QQQ)》》",
-    page_icon="🌊",
-    layout="wide"
-)
-
-TICKER_QQQ = "QQQ"
-BIG_SEVEN = ["NVDA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA"]
-LEADERS = ["MU", "TSM", "AMD", "AVGO", "QCOM", "ARM", "ASML", "PLTR", "NFLX", "INTC"]
-ALL_TICKERS = [TICKER_QQQ] + BIG_SEVEN + LEADERS
-
-# =====================================================================
-# 2. 人性化时间引擎 (大马 MYT & 美东 ET)
-# =====================================================================
 tz_myt = pytz.timezone("Asia/Kuala_Lumpur")
 tz_ny = pytz.timezone("America/New_York")
 
 now_myt = datetime.datetime.now(tz_myt)
 now_ny = datetime.datetime.now(tz_ny)
 
-target_open_ny = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
-if now_ny >= target_open_ny and now_ny.hour >= 16:
-    target_open_ny += timedelta(days=1)
-while target_open_ny.weekday() >= 5:
-    target_open_ny += timedelta(days=1)
-
-target_open_myt = target_open_ny.astimezone(tz_myt)
-time_to_open = target_open_myt - now_myt
-
-c_t1, c_t2, c_t3 = st.columns([1.5, 1.5, 2])
-c_t1.info(f"🕒 **大马时间 (MYT):** {now_myt.strftime('%Y-%m-%d %H:%M:%S')}")
-c_t2.info(f"🇺🇸 **美东时间 (ET):** {now_ny.strftime('%Y-%m-%d %H:%M:%S')}")
-
-if 0 <= time_to_open.total_seconds() <= 86400:
-    hours, remainder = divmod(int(time_to_open.total_seconds()), 3600)
-    minutes, seconds = divmod(remainder, 60)
-    c_t3.warning(f"⏳ **距离今晚美股开盘:** {hours}小时 {minutes}分 {seconds}秒")
-else:
-    c_t3.success("🟢 **美股交易中 / 盘后复盘阶段**")
-
 # =====================================================================
-# 3. 双模数据抓取引擎 (Tiingo 优先，429 自动无缝切换 yfinance)
+# 2. QQQ 数据抓取引擎
 # =====================================================================
-@st.cache_data(ttl=60, show_spinner=False)
-def fetch_complete_data_audited(ticker, token):
-    df_1h = None
-    source_1h = "None"
-    start_date = (datetime.datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
-    
-    # 3.1 优先请求 Tiingo 1H (IEX API)
-    url = f"https://api.tiingo.com/iex/{ticker}/prices?startDate={start_date}&resampleFreq=1hour&token={token}&columns=open,high,low,close,volume"
-    headers = {'Content-Type': 'application/json'}
-    try:
-        resp = requests.get(url, headers=headers, timeout=6)
-        if resp.status_code == 200:
-            data = resp.json()
-            if data and isinstance(data, list) and len(data) >= 30:
-                df_t = pd.DataFrame(data)
-                df_t['date'] = pd.to_datetime(df_t['date'])
-                df_t.set_index('date', inplace=True)
-                df_t.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
-                df_1h = df_t[['Open', 'High', 'Low', 'Close', 'Volume']].sort_index()
-                df_1h.index = df_1h.index.tz_localize("UTC").tz_convert("America/New_York") if df_1h.index.tz is None else df_1h.index.tz_convert("America/New_York")
-                source_1h = "Tiingo (IEX 1H API)"
-    except Exception:
-        pass
+def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
+    df_1h, df_5m = None, None
+    err_log = []
+    start_str = (now_myt - timedelta(days=60)).strftime("%Y-%m-%d")
 
-    # 3.2 兜底请求 yfinance 1H
+    for attempt in range(max_retries):
+        url = f"https://api.tiingo.com/iex/{TICKER}/prices?startDate={start_str}&resampleFreq=1hour&token={TIINGO_TOKEN}&columns=open,high,low,close,volume"
+        try:
+            resp = requests.get(url, headers={"Content-Type": "application/json"}, timeout=6)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data and isinstance(data, list) and len(data) >= 30:
+                    df_t = pd.DataFrame(data)
+                    df_t["date"] = pd.to_datetime(df_t["date"])
+                    df_t.set_index("date", inplace=True)
+                    df_t.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
+                    df_1h = df_t[["Open", "High", "Low", "Close", "Volume"]].sort_index()
+                    df_1h.index = df_1h.index.tz_localize("UTC").tz_convert(tz_ny) if df_1h.index.tz is None else df_1h.index.tz_convert(tz_ny)
+                    break
+        except Exception:
+            time.sleep(1)
+
     if df_1h is None:
         try:
-            df_yf = yf.download(ticker, period="1mo", interval="1h", prepost=True, progress=False)
+            df_yf = yf.download(TICKER, period="2mo", interval="1h", prepost=True, progress=False)
             if df_yf is not None and not df_yf.empty:
                 if isinstance(df_yf.columns, pd.MultiIndex):
                     df_yf.columns = df_yf.columns.get_level_values(0)
-                df_1h = df_yf[['Open', 'High', 'Low', 'Close', 'Volume']].dropna().copy()
-                df_1h.index = df_1h.index.tz_localize("UTC").tz_convert("America/New_York") if df_1h.index.tz is None else df_1h.index.tz_convert("America/New_York")
-                source_1h = "YahooFinance (1H prepost)"
-        except Exception:
-            pass
+                df_1h = df_yf[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+                df_1h.index = df_1h.index.tz_localize("UTC").tz_convert(tz_ny) if df_1h.index.tz is None else df_1h.index.tz_convert(tz_ny)
+        except Exception as e:
+            err_log.append("YahooFinance 1H 失败: " + str(e))
 
-    # 3.3 请求 yfinance 5M 实时盘前
-    df_5m = None
-    source_5m = "None"
-    try:
-        df_5m_raw = yf.download(ticker, period="5d", interval="5m", prepost=True, progress=False)
-        if df_5m_raw is not None and not df_5m_raw.empty:
-            if isinstance(df_5m_raw.columns, pd.MultiIndex):
-                df_5m_raw.columns = df_5m_raw.columns.get_level_values(0)
-            df_5m = df_5m_raw[['Open', 'High', 'Low', 'Close', 'Volume']].dropna().copy()
-            df_5m.index = df_5m.index.tz_localize("UTC").tz_convert("America/New_York") if df_5m.index.tz is None else df_5m.index.tz_convert("America/New_York")
-            source_5m = "YahooFinance (Live 5M Pre-market)"
-    except Exception:
-        pass
+    for attempt in range(max_retries):
+        try:
+            df_5m_raw = yf.download(TICKER, period=period_5m, interval="5m", prepost=True, progress=False)
+            if df_5m_raw is not None and not df_5m_raw.empty:
+                if isinstance(df_5m_raw.columns, pd.MultiIndex):
+                    df_5m_raw.columns = df_5m_raw.columns.get_level_values(0)
+                df_5m = df_5m_raw[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
+                df_5m.index = df_5m.index.tz_localize("UTC").tz_convert(tz_ny) if df_5m.index.tz is None else df_5m.index.tz_convert(tz_ny)
+                break
+        except Exception as e:
+            err_log.append("YahooFinance 5M 失败: " + str(e))
+            time.sleep(1)
 
-    return df_1h, source_1h, df_5m, source_5m
+    return df_1h, df_5m, err_log
 
 # =====================================================================
-# 4. Primary + Secondary 双梯队战区与客观极值量化算法
+# 3. 核心运算：100% 对齐富途 13 行与 2B/全战区回测
 # =====================================================================
-def calculate_audited_levels(df_1h, source_1h, df_5m, source_5m, ticker):
-    if df_1h is None or len(df_1h) < 25:
-        return None
-    
-    today_ny = datetime.datetime.now(tz_ny).date()
-    
-    # 昨日 RTH 极值 (09:30 - 16:00 ET)
-    df_rth = df_1h[(df_1h.index.hour > 9) | ((df_1h.index.hour == 9) & (df_1h.index.minute >= 30))]
+def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
+    if df_1h is None: return None
+    sub_1h = df_1h[df_1h.index <= as_of_ny_time].copy()
+    if len(sub_1h) < 25: return None
+
+    today_ny = as_of_ny_time.date()
+    df_rth = sub_1h[(sub_1h.index.hour > 9) | ((sub_1h.index.hour == 9) & (sub_1h.index.minute >= 30))]
     df_rth = df_rth[df_rth.index.hour < 16]
     past_dates = sorted(list(set(df_rth.index.date)))
     past_dates = [d for d in past_dates if d < today_ny]
-    
+
     if past_dates:
         prev_df = df_rth[df_rth.index.date == past_dates[-1]]
-        pdh_idx, pdl_idx = prev_df['High'].idxmax(), prev_df['Low'].idxmin()
-        pdh_val, pdl_val = float(prev_df.loc[pdh_idx, 'High']), float(prev_df.loc[pdl_idx, 'Low'])
-        pdh_time_str, pdl_time_str = pdh_idx.strftime("%Y-%m-%d %H:%M ET"), pdl_idx.strftime("%Y-%m-%d %H:%M ET")
+        pdh_idx, pdl_idx = prev_df["High"].idxmax(), prev_df["Low"].idxmin()
+        pdh_val, pdl_val = float(prev_df.loc[pdh_idx, "High"]), float(prev_df.loc[pdl_idx, "Low"])
+        pdh_time, pdl_time = pdh_idx.strftime("%Y-%m-%d %H:%M ET"), pdl_idx.strftime("%Y-%m-%d %H:%M ET")
     else:
-        pdh_val, pdl_val = float(df_1h['High'].iloc[-10:].max()), float(df_1h['Low'].iloc[-10:].min())
-        pdh_time_str, pdl_time_str = "Prior Session", "Prior Session"
+        pdh_val, pdl_val = float(sub_1h["High"].iloc[-10:].max()), float(sub_1h["Low"].iloc[-10:].min())
+        pdh_time, pdl_time = "Prior Session", "Prior Session"
 
-    # 今日盘前极值 (04:00 - 09:30 ET)
-    if df_5m is not None:
-        today_pm = df_5m[(df_5m.index.date == today_ny) & (df_5m.index.hour >= 4) & ((df_5m.index.hour < 9) | ((df_5m.index.hour == 9) & (df_5m.index.minute < 30)))]
-        if not today_pm.empty:
-            pmh_idx, pml_idx = today_pm['High'].idxmax(), today_pm['Low'].idxmin()
-            pmh_val, pml_val = float(today_pm.loc[pmh_idx, 'High']), float(today_pm.loc[pml_idx, 'Low'])
-            pmh_time_str, pml_time_str = pmh_idx.strftime("%Y-%m-%d %H:%M ET"), pml_idx.strftime("%Y-%m-%d %H:%M ET")
-            live_price = float(today_pm['Close'].iloc[-1])
-        else:
-            pmh_idx, pml_idx = df_5m['High'].iloc[-12:].idxmax(), df_5m['Low'].iloc[-12:].idxmin()
-            pmh_val, pml_val = float(df_5m.loc[pmh_idx, 'High']), float(df_5m.loc[pml_idx, 'Low'])
-            pmh_time_str, pml_time_str = pmh_idx.strftime("%Y-%m-%d %H:%M ET"), pml_idx.strftime("%Y-%m-%d %H:%M ET")
-            live_price = float(df_5m['Close'].iloc[-1])
+    sub_5m_pm = df_5m[(df_5m.index.date == today_ny) & (df_5m.index.hour >= 4) & (df_5m.index < as_of_ny_time)] if df_5m is not None else None
+    if sub_5m_pm is not None and not sub_5m_pm.empty:
+        pmh_idx, pml_idx = sub_5m_pm["High"].idxmax(), sub_5m_pm["Low"].idxmin()
+        pmh_val, pml_val = float(sub_5m_pm.loc[pmh_idx, "High"]), float(sub_5m_pm.loc[pml_idx, "Low"])
+        pmh_time, pml_time = pmh_idx.strftime("%Y-%m-%d %H:%M ET"), pml_idx.strftime("%Y-%m-%d %H:%M ET")
+        live_price = float(sub_5m_pm["Close"].iloc[-1])
     else:
-        pmh_val, pml_val = float(df_1h['High'].iloc[-4:].max()), float(df_1h['Low'].iloc[-4:].min())
-        pmh_time_str, pml_time_str = "Recent 1H", "Recent 1H"
-        live_price = float(df_1h['Close'].iloc[-1])
+        pmh_val, pml_val = float(sub_1h["High"].iloc[-4:].max()), float(sub_1h["Low"].iloc[-4:].min())
+        pmh_time, pml_time = "Recent 1H", "Recent 1H"
+        live_price = float(sub_1h["Close"].iloc[-1])
 
-    # 1H 均线与 ATR
-    df_1h_calc = df_1h.copy()
-    df_1h_calc['EMA20'] = df_1h_calc['Close'].ewm(span=20, adjust=False).mean()
-    df_1h_calc['SMA50'] = df_1h_calc['Close'].rolling(window=50).mean()
-    
-    tr = np.maximum(df_1h_calc['High'] - df_1h_calc['Low'], 
-                    np.maximum((df_1h_calc['High'] - df_1h_calc['Close'].shift(1)).abs(), 
-                               (df_1h_calc['Low'] - df_1h_calc['Close'].shift(1)).abs()))
+    sub_1h["EMA20"] = sub_1h["Close"].ewm(span=20, adjust=False).mean()
+    sub_1h["EMA20_slope"] = sub_1h["EMA20"].diff()
+
+    tr = np.maximum(sub_1h["High"] - sub_1h["Low"], np.maximum((sub_1h["High"] - sub_1h["Close"].shift(1)).abs(), (sub_1h["Low"] - sub_1h["Close"].shift(1)).abs()))
     atr = float(tr.rolling(14).mean().iloc[-1]) if not np.isnan(tr.rolling(14).mean().iloc[-1]) else (live_price * 0.008)
 
-    # 1H Grimes 拐点扫描 (Primary + Secondary)
-    subset = df_1h_calc.iloc[-60:].copy()
-    highs, lows, opens, closes, times = subset['High'].values, subset['Low'].values, subset['Open'].values, subset['Close'].values, subset.index
-    
+    subset = sub_1h.iloc[-60:].copy()
+    highs, lows, opens, closes, times = subset["High"].values, subset["Low"].values, subset["Open"].values, subset["Close"].values, subset.index
+
     pivots_high, pivots_low = [], []
     for i in range(2, len(subset) - 2):
-        if highs[i] == max(highs[i-2:i+3]):
-            pivots_high.append((float(highs[i]), float(max(opens[i], closes[i])), times[i].strftime("%m-%d %H:%M ET")))
-        if lows[i] == min(lows[i-2:i+3]):
-            pivots_low.append((float(min(opens[i], closes[i])), float(lows[i]), times[i].strftime("%m-%d %H:%M ET")))
+        if highs[i] == max(highs[i-2:i+3]): pivots_high.append((float(highs[i]), float(max(opens[i], closes[i])), times[i].strftime("%m-%d %H:%M ET")))
+        if lows[i] == min(lows[i-2:i+3]): pivots_low.append((float(min(opens[i], closes[i])), float(lows[i]), times[i].strftime("%m-%d %H:%M ET")))
 
-    # SBR 排序
-    valid_highs = [p for p in pivots_high if p[1] > live_price]
-    valid_highs.sort(key=lambda x: x[1])
+    valid_highs = [p for p in pivots_high if p[0] > live_price]
+    valid_highs.sort(key=lambda x: x[0])
     sbr_top, sbr_bot, sbr_time = valid_highs[0] if len(valid_highs) >= 1 else (live_price + 1.2 * atr, live_price + 0.6 * atr, "Range High")
     sbr2_top, sbr2_bot, sbr2_time = valid_highs[1] if len(valid_highs) >= 2 else (sbr_top + 1.2 * atr, sbr_top + 0.5 * atr, "Tier-2 High")
 
-    # RBS 排序
-    valid_lows = [p for p in pivots_low if p[0] < live_price]
-    valid_lows.sort(key=lambda x: x[0], reverse=True)
+    valid_lows = [p for p in pivots_low if p[1] < live_price]
+    valid_lows.sort(key=lambda x: x[1], reverse=True)
     rbs_top, rbs_bot, rbs_time = valid_lows[0] if len(valid_lows) >= 1 else (live_price - 0.6 * atr, live_price - 1.2 * atr, "Range Low")
     rbs2_top, rbs2_bot, rbs2_time = valid_lows[1] if len(valid_lows) >= 2 else (rbs_bot - 0.5 * atr, rbs_bot - 1.2 * atr, "Tier-2 Low")
 
-    # =====================================================================
-    # 三维共振判决 (已优化：解耦 SMA50 滞后死锁，引入极值突破与敏捷 EMA20)
-    # =====================================================================
-    ema20_now = float(df_1h_calc['EMA20'].iloc[-1])
-    
-    # 1. 均线站位分：纯粹基于 1H EMA20 站位
-    score_ma = 1 if live_price > ema20_now else (-1 if live_price < ema20_now else 0)
+    ema_now = sub_1h["EMA20"].iloc[-1]
+    slope_now = sub_1h["EMA20_slope"].iloc[-1]
 
-    # 2. 结构与极值分：优先抓取昨高昨低或盘前极值突破，次级参考 Grimes 拐点
-    score_hhll = 0
-    if live_price > pdh_val or live_price > pmh_val:
-        score_hhll = 1
-    elif live_price < pdl_val or live_price < pml_val:
-        score_hhll = -1
-    elif len(pivots_high) >= 2 and len(pivots_low) >= 2:
-        last_2_h, last_2_l = [p[0] for p in pivots_high[-2:]], [p[1] for p in pivots_low[-2:]]
-        if last_2_h[1] > last_2_h[0] and last_2_l[1] > last_2_l[0]:
-            score_hhll = 1
-        elif last_2_h[1] < last_2_h[0] and last_2_l[1] < last_2_l[0]:
-            score_hhll = -1
-
-    # 3. 均线斜率分：回溯 3 根 1H K 线，提升对急跌急涨的捕捉速度
-    ema20_prev = float(df_1h_calc['EMA20'].iloc[-3])
-    ema_slope = (ema20_now - ema20_prev) / ema20_prev * 100
-    score_slope = 1 if ema_slope > 0.10 else (-1 if ema_slope < -0.10 else 0)
-
-    total_score = score_ma + score_hhll + score_slope
-    final_bias = 1 if total_score >= 2 else (-1 if total_score <= -2 else 0)
-
-    prev_close = float(df_1h['Close'].iloc[-2])
-    chg_pct = (live_price - prev_close) / prev_close * 100
-    
-    # 轮动策略信号判定
-    if live_price >= sbr_bot: action = "🔴 止盈高抛 (Take Profit)"
-    elif live_price <= rbs_top: action = "🟢 支撑轮动 (Rotation In)"
-    elif live_price > ema20_now: action = "📈 多头持仓 (Holding)"
-    else: action = "📉 偏弱观望 (Weak)"
+    if live_price > ema_now and slope_now > 0:
+        trend_bias, bias_desc = 1, "🟢 绿灯 (做多为主)"
+    elif live_price < ema_now and slope_now < 0:
+        trend_bias, bias_desc = -1, "🔴 红灯 (做空为主)"
+    else:
+        trend_bias, bias_desc = 0, "🟡 黄灯 (震荡防守)"
 
     return {
-        "TICKER": ticker,
-        "Group": "Mag 7" if ticker in BIG_SEVEN else ("Index" if ticker == "QQQ" else "Growth"),
-        "Close": round(live_price, 2),
-        "Change%": round(chg_pct, 2),
-        "Action": action,
-        "TREND_BIAS": final_bias,
-        "TOTAL_SCORE": total_score,
-        "EMA20": round(ema20_now, 2),
-        "SBR_TOP": round(sbr_top, 2), "SBR_BOT": round(sbr_bot, 2), "SBR_TIME": sbr_time,
-        "RBS_TOP": round(rbs_top, 2), "RBS_BOT": round(rbs_bot, 2), "RBS_TIME": rbs_time,
-        "SBR2_TOP": round(sbr2_top, 2), "SBR2_BOT": round(sbr2_bot, 2), "SBR2_TIME": sbr2_time,
-        "RBS2_TOP": round(rbs2_top, 2), "RBS2_BOT": round(rbs2_bot, 2), "RBS2_TIME": rbs2_time,
-        "PDH": round(pdh_val, 2), "PDH_TIME": pdh_time_str,
-        "PDL": round(pdl_val, 2), "PDL_TIME": pdl_time_str,
-        "PMH": round(pmh_val, 2), "PMH_TIME": pmh_time_str,
-        "PML": round(pml_val, 2), "PML_TIME": pml_time_str,
-        "SOURCE_1H": source_1h, "SOURCE_5M": source_5m
+        "live_price": live_price, "TREND_BIAS": trend_bias, "BIAS_DESC": bias_desc,
+        "EMA20_1H": round(ema_now, 2), "ATR_1H": round(atr, 2),
+        "SBR_TOP": sbr_top, "SBR_BOT": sbr_bot, "SBR_TIME": sbr_time,
+        "RBS_TOP": rbs_top, "RBS_BOT": rbs_bot, "RBS_TIME": rbs_time,
+        "SBR2_TOP": sbr2_top, "SBR2_BOT": sbr2_bot, "SBR2_TIME": sbr2_time,
+        "RBS2_TOP": rbs2_top, "RBS2_BOT": rbs2_bot, "RBS2_TIME": rbs2_time,
+        "PDH": pdh_val, "PDH_TIME": pdh_time, "PDL": pdl_val, "PDL_TIME": pdl_time,
+        "PMH": pmh_val, "PMH_TIME": pmh_time, "PML": pml_val, "PML_TIME": pml_time
     }
 
+def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
+    trades = []
+    if p is None or df_5m is None: return trades
+
+    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=1)) & (df_5m.index <= window_end_ny)].copy()
+    if len(day_5m) < 15: return trades
+
+    tr_5m = np.maximum(day_5m["High"] - day_5m["Low"], np.maximum((day_5m["High"] - day_5m["Close"].shift(1)).abs(), (day_5m["Low"] - day_5m["Close"].shift(1)).abs()))
+    day_5m["ATR14"] = tr_5m.rolling(14).mean()
+
+    in_pos, pos_type = False, 0
+    entry_p, sl_p, tp_p = 0.0, 0.0, 0.0
+    entry_time_ny = None
+    daily_trade_count = 0
+    futu_signal_tag = ""
+
+    start_idx = 0
+    for idx_i, t_idx in enumerate(day_5m.index):
+        if t_idx >= start_cutoff_ny:
+            start_idx = idx_i
+            break
+
+    for i in range(start_idx, len(day_5m)):
+        cur_t_ny = day_5m.index[i]
+        c, o, h, l = day_5m["Close"].iloc[i], day_5m["Open"].iloc[i], day_5m["High"].iloc[i], day_5m["Low"].iloc[i]
+        atr_v = day_5m["ATR14"].iloc[i] if not np.isnan(day_5m["ATR14"].iloc[i]) else 0.8
+        is_window_close = (cur_t_ny >= window_end_ny - timedelta(minutes=5))
+
+        if in_pos:
+            exit_flag, reason, exit_p = False, "", 0.0
+            if pos_type == 1:
+                if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
+                elif l <= sl_p: exit_flag, reason, exit_p = True, "SL (止损)", sl_p
+                elif h >= tp_p: exit_flag, reason, exit_p = True, "TP (2R止盈)", tp_p
+            elif pos_type == -1:
+                if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
+                elif h >= sl_p: exit_flag, reason, exit_p = True, "SL (止损)", sl_p
+                elif l <= tp_p: exit_flag, reason, exit_p = True, "TP (2R止盈)", tp_p
+
+            if exit_flag:
+                pnl = (exit_p - entry_p) if pos_type == 1 else (entry_p - exit_p)
+                trades.append({
+                    "Signal": futu_signal_tag,
+                    "Entry_MYT": entry_time_ny.astimezone(tz_myt).strftime("%H:%M"), "Entry_ET": entry_time_ny.strftime("%H:%M"),
+                    "Exit_MYT": cur_t_ny.astimezone(tz_myt).strftime("%H:%M"), "Exit_ET": cur_t_ny.strftime("%H:%M"),
+                    "Entry_Price": round(entry_p, 2), "Exit_Price": round(exit_p, 2),
+                    "SL": round(sl_p, 2), "TP": round(tp_p, 2), "PnL_Points": round(pnl, 2),
+                    "Reason": reason, "Result": "盈利" if pnl > 0 else ("保本" if pnl == 0 else "亏损")
+                })
+                in_pos = False
+                daily_trade_count += 1
+                break
+
+        if not in_pos and daily_trade_count == 0 and cur_t_ny < (window_end_ny - timedelta(minutes=15)):
+            bias = p["TREND_BIAS"]
+            prev_c, prev_o = day_5m["Close"].iloc[i-1], day_5m["Open"].iloc[i-1]
+            prev_h, prev_l = day_5m["High"].iloc[i-1], day_5m["Low"].iloc[i-1]
+
+            # 完整覆盖：第一梯队 RBS/SBR、第二梯队 RBS2/SBR2、PDH/PDL、PMH/PML
+            near_support = (
+                (prev_l <= p["RBS_TOP"] and prev_c >= p["RBS_BOT"]) or
+                (prev_l <= p["RBS2_TOP"] and prev_c >= p["RBS2_BOT"]) or
+                (prev_l <= p["PDL"] and prev_c > p["PDL"]) or
+                (prev_l <= p["PML"] and prev_c > p["PML"])
+            )
+            near_resistance = (
+                (prev_h >= p["SBR_BOT"] and prev_c <= p["SBR_TOP"]) or
+                (prev_h >= p["SBR2_BOT"] and prev_c <= p["SBR2_TOP"]) or
+                (prev_h >= p["PDH"] and prev_c < p["PDH"]) or
+                (prev_h >= p["PMH"] and prev_c < p["PMH"])
+            )
+
+            llv5 = day_5m["Low"].iloc[max(0, i-5):i].min()
+            hhv5 = day_5m["High"].iloc[max(0, i-5):i].max()
+
+            b_2b = (prev_l < llv5 or prev_l <= p["PDL"] or prev_l <= p["PML"] or prev_l <= p["RBS_BOT"] or prev_l <= p["RBS2_BOT"]) and (prev_c > prev_o) and (prev_c > llv5)
+            s_2b = (prev_h > hhv5 or prev_h >= p["PDH"] or prev_h >= p["PMH"] or prev_h >= p["SBR_TOP"] or prev_h >= p["SBR2_TOP"]) and (prev_c < prev_o) and (prev_c < hhv5)
+
+            stop_buffer = max(0.5 * atr_v, 1.2)
+
+            if (bias == 1 or bias == 0) and (b_2b or (near_support and prev_c > prev_o)):
+                in_pos, pos_type = True, 1
+                entry_p = c
+                sl_p = min(prev_l, l) - stop_buffer
+                tp_p = c + 2.0 * (c - sl_p)
+                entry_time_ny = cur_t_ny
+                futu_signal_tag = "▲▲ 2B" if b_2b else "▲ CALL"
+            elif (bias == -1 or bias == 0) and (s_2b or (near_resistance and prev_c < prev_o)):
+                in_pos, pos_type = True, -1
+                entry_p = c
+                sl_p = max(prev_h, h) + stop_buffer
+                tp_p = c - 2.0 * (sl_p - c)
+                entry_time_ny = cur_t_ny
+                futu_signal_tag = "▼▼ 2B" if s_2b else "▼ PUT"
+
+    return trades
+
 # =====================================================================
-# 5. 主程序渲染 (《《癸水(QQQ)》》座舱)
+# 4. 账本存储
 # =====================================================================
-st.title("🌊 《《癸水(QQQ)》》 0DTE 期权中枢 & 17 核心股轮动雷达")
+RECORD_COLUMNS = [
+    "Date_MYT", "TREND_BIAS", "EMA20_1H", "ATR_1H", "SBR_TOP", "SBR_BOT", "RBS_TOP", "RBS_BOT",
+    "SBR2_TOP", "SBR2_BOT", "RBS2_TOP", "RBS2_BOT", "PDH", "PDL", "PMH", "PML",
+    "Signal", "Entry_MYT", "Entry_ET", "Exit_MYT", "Exit_ET", "Entry_Price", "Exit_Price", "SL", "TP", "PnL_Points", "Reason", "Result"
+]
 
-results = []
-all_hist_data = {}
-with st.spinner("执行双梯队战区运算与 17 股轮动扫描中..."):
-    for t in ALL_TICKERS:
-        df_1h, src_1h, df_5m, src_5m = fetch_complete_data_audited(t, TIINGO_TOKEN)
-        if df_1h is not None:
-            all_hist_data[t] = df_1h
-        res = calculate_audited_levels(df_1h, src_1h, df_5m, src_5m, t)
-        if res:
-            results.append(res)
+def load_journal():
+    if not os.path.exists(CSV_FILE):
+        df_init = pd.DataFrame(columns=RECORD_COLUMNS)
+        df_init.to_csv(CSV_FILE, index=False, encoding="utf-8-sig")
+        return df_init
+    df_read = pd.read_csv(CSV_FILE)
+    for col in RECORD_COLUMNS:
+        if col not in df_read.columns: df_read[col] = np.nan
+    return df_read
 
-if results:
-    df_res = pd.DataFrame(results)
-    df_stocks = df_res[df_res["TICKER"] != "QQQ"]
-    qqq_row = df_res[df_res["TICKER"] == "QQQ"].iloc[0]
+def append_to_journal(date_str, params, trades):
+    df_cur = load_journal()
+    if not df_cur.empty and date_str in df_cur["Date_MYT"].astype(str).values: return False, "当天记录已存在"
 
-    # --- 5.1 顶部战况与市场宽度指标卡 ---
-    up_cnt = sum(df_stocks["Change%"] > 0)
-    down_cnt = sum(df_stocks["Change%"] <= 0)
-    mag7_up = sum(df_stocks[df_stocks["Group"] == "Mag 7"]["Change%"] > 0)
-    breadth_pct = int(sum(df_stocks["Close"] > df_stocks["EMA20"]) / len(df_stocks) * 100)
+    rows = []
+    base_info = {
+        "Date_MYT": date_str, "TREND_BIAS": params["TREND_BIAS"], "EMA20_1H": params.get("EMA20_1H", 0.0), "ATR_1H": params.get("ATR_1H", 0.0),
+        "SBR_TOP": params["SBR_TOP"], "SBR_BOT": params["SBR_BOT"], "RBS_TOP": params["RBS_TOP"], "RBS_BOT": params["RBS_BOT"],
+        "SBR2_TOP": params["SBR2_TOP"], "SBR2_BOT": params["SBR2_BOT"], "RBS2_TOP": params["RBS2_TOP"], "RBS2_BOT": params["RBS2_BOT"],
+        "PDH": params["PDH"], "PDL": params["PDL"], "PMH": params["PMH"], "PML": params["PML"]
+    }
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("🎯 QQQ 最新现价", f"${qqq_row['Close']}", f"{qqq_row['Change%']}%")
-    m2.metric("📊 17 股多空分布", f"{up_cnt} 涨 / {down_cnt} 跌", f"宽度: {breadth_pct}% > 20EMA")
-    m3.metric("👑 Big 7 巨头动能", f"{mag7_up} / 7 支上涨", "决定 QQQ 真实推力")
-    bias_desc = "🟢 偏多 (CALL)" if qqq_row['TREND_BIAS'] == 1 else ("🔴 偏空 (PUT)" if qqq_row['TREND_BIAS'] == -1 else "⚪ 震荡 (NEUTRAL)")
-    m4.metric("🧭 QQQ 宏观定调", bias_desc, f"共振得分: {qqq_row['TOTAL_SCORE']} / 3")
-
-    st.markdown("---")
-
-    # --- 5.2 核心左右双栏：左侧【买卖哪只股】 vs 右侧【QQQ 13 行参数复制】 ---
-    col_left, col_right = st.columns([1, 1.2])
-    
-    with col_left:
-        st.subheader("⚡ 【今日实战买卖雷达】(轮动加仓 & 止盈)")
-        
-        # 筛选买卖标的
-        buy_list = df_stocks[df_stocks["Action"].str.contains("轮动")]
-        profit_list = df_stocks[df_stocks["Action"].str.contains("止盈")]
-        holding_list = df_stocks[df_stocks["Action"].str.contains("持仓")]
-        
-        st.markdown("#### 🟢 立即轮动买入区 (ROTATION IN)")
-        if not buy_list.empty:
-            for _, r in buy_list.iterrows():
-                st.success(f"**{r['TICKER']}** (${r['Close']}, {r['Change%']}%) ➔ 踩入 1H RBS 支撑带 (`${r['RBS_BOT']} ~ ${r['RBS_TOP']}`)\n\n*📌 建议：QQQ 期权盈利资金，优先分批定投买入*")
-        else:
-            st.info("暂无个股踩入 1H RBS 支撑位（无错杀低吸点）")
-
-        st.markdown("#### 🔴 立即止盈高抛区 (TAKE PROFIT)")
-        if not profit_list.empty:
-            for _, r in profit_list.iterrows():
-                st.error(f"**{r['TICKER']}** (${r['Close']}, +{r['Change%']}%) ➔ 刺入 1H SBR 阻力带 (`${r['SBR_BOT']} ~ ${r['SBR_TOP']}`)\n\n*📌 建议：正股底仓分批止盈高抛，收回现金*")
-        else:
-            st.info("暂无个股触及 1H SBR 阻力位（持仓继续奔跑）")
-
-        st.markdown("#### ⚪ 顺势持仓待命区 (HOLDING)")
-        hold_str = ", ".join([f"**{r['TICKER']}**({r['Change%']}%)" for _, r in holding_list.iterrows()]) if not holding_list.empty else "无"
-        st.caption(f"处于 20 EMA 上方顺势运行: {hold_str}")
-
-    with col_right:
-        st.subheader("📋 【QQQ 专属】富途 5M 复制座舱")
-        st.markdown(f"* **现价通道:** `{qqq_row['SOURCE_5M']}` | **1H 通道:** `{qqq_row['SOURCE_1H']}`")
-        st.markdown(f"* **⚡ 今日盘前极值:** `${qqq_row['PMH']}` ~ `${qqq_row['PML']}` *(时间: `{qqq_row['PMH_TIME']}`)*")
-        st.markdown(f"* **📌 昨日常规极值:** `${qqq_row['PDH']}` ~ `${qqq_row['PDL']}` *(时间: `{qqq_row['PDH_TIME']}`)*")
-        st.markdown(f"* **🔴 Primary SBR 阻力:** `${qqq_row['SBR_BOT']} ~ ${qqq_row['SBR_TOP']}` *(K线: `{qqq_row['SBR_TIME']}`)*")
-        st.markdown(f"* **🟢 Primary RBS 支撑:** `${qqq_row['RBS_BOT']} ~ ${qqq_row['RBS_TOP']}` *(K线: `{qqq_row['RBS_TIME']}`)*")
-        st.markdown(f"* **🔴 Secondary SBR2:** `${qqq_row['SBR2_BOT']} ~ ${qqq_row['SBR2_TOP']}` *(K线: `{qqq_row['SBR2_TIME']}`)*")
-        st.markdown(f"* **🟢 Secondary RBS2:** `${qqq_row['RBS2_BOT']} ~ ${qqq_row['RBS2_TOP']}` *(K线: `{qqq_row['RBS2_TIME']}`)*")
-        
-        st.markdown("##### 复制到富途指标顶部 13 行代码 (点右上角直接复制):")
-        futu_13_code = f"""TREND_BIAS := {int(qqq_row['TREND_BIAS'])};       {{ 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: {qqq_row['TOTAL_SCORE']}] }}
-
-{{ --- 第一梯队主战区 (Primary Zones) --- }}
-SBR_TOP    := {qqq_row['SBR_TOP']:.2f};  {{ 2. Primary 1H 阻力顶沿 [{qqq_row['SBR_TIME']}] }}
-SBR_BOT    := {qqq_row['SBR_BOT']:.2f};  {{ 3. Primary 1H 阻力底沿 [{qqq_row['SBR_TIME']}] }}
-RBS_TOP    := {qqq_row['RBS_TOP']:.2f};  {{ 4. Primary 1H 支撑顶沿 [{qqq_row['RBS_TIME']}] }}
-RBS_BOT    := {qqq_row['RBS_BOT']:.2f};  {{ 5. Primary 1H 支撑底沿 [{qqq_row['RBS_TIME']}] }}
-
-{{ --- 第二梯队拓展战区 (Secondary Zones - 突破后备用) --- }}
-SBR2_TOP   := {qqq_row['SBR2_TOP']:.2f};  {{ 6. Secondary 1H 更高阻力顶沿 [{qqq_row['SBR2_TIME']}] }}
-SBR2_BOT   := {qqq_row['SBR2_BOT']:.2f};  {{ 7. Secondary 1H 更高阻力底沿 [{qqq_row['SBR2_TIME']}] }}
-RBS2_TOP   := {qqq_row['RBS2_TOP']:.2f};  {{ 8. Secondary 1H 更低支撑顶沿 [{qqq_row['RBS2_TIME']}] }}
-RBS2_BOT   := {qqq_row['RBS2_BOT']:.2f};  {{ 9. Secondary 1H 更低支撑底沿 [{qqq_row['RBS2_TIME']}] }}
-
-{{ --- 全市场客观极值 (Sweep Anchors) --- }}
-PDH_LINE   := {qqq_row['PDH']:.2f};  {{ 10. 昨日最高价 PDH [{qqq_row['PDH_TIME']}] }}
-PDL_LINE   := {qqq_row['PDL']:.2f};  {{ 11. 昨日最低价 PDL [{qqq_row['PDL_TIME']}] }}
-PMH_LINE   := {qqq_row['PMH']:.2f};  {{ 12. 盘前最高价 PMH [{qqq_row['PMH_TIME']}] }}
-PML_LINE   := {qqq_row['PML']:.2f};  {{ 13. 盘前最低价 PML [{qqq_row['PML_TIME']}] }}"""
-        st.code(futu_13_code, language="pascal")
-
-    st.markdown("---")
-
-    # --- 5.3 17 股全景轮动雷达看板 ---
-    st.subheader("🗺️ 17 支核心个股全景雷达 (轮动与止盈监控)")
-    
-    def highlight_action(val):
-        if "止盈" in str(val):
-            return "background-color: #49111c; color: #ffccd5; font-weight: bold;"
-        elif "轮动" in str(val):
-            return "background-color: #1b4332; color: #d8f3dc; font-weight: bold;"
-        return ""
-
-    display_cols = ["TICKER", "Group", "Close", "Change%", "Action", "EMA20", "RBS_TOP", "SBR_BOT", "PDL", "PDH", "SOURCE_5M"]
-    styler = df_stocks[display_cols].sort_values(by="Change%", ascending=False).style
-    if hasattr(styler, 'map'):
-        styled_df = styler.map(highlight_action, subset=["Action"])
+    if trades:
+        for t in trades:
+            r = dict(base_info); r.update(t); rows.append(r)
     else:
-        styled_df = styler.applymap(highlight_action, subset=["Action"])
-    st.dataframe(styled_df, use_container_width=True, height=480)
+        empty_t = {
+            "Signal": "NO_TRADE", "Entry_MYT": "-", "Entry_ET": "-", "Exit_MYT": "-", "Exit_ET": "-",
+            "Entry_Price": 0.0, "Exit_Price": 0.0, "SL": 0.0, "TP": 0.0, "PnL_Points": 0.0, "Reason": "窗口期无2B/战区信号", "Result": "无"
+        }
+        r = dict(base_info); r.update(empty_t); rows.append(r)
 
-    # --- 5.4 历史时光机导出 (Pass Record) ---
-    st.markdown("---")
-    st.subheader("⏳ 历史复盘时光机与数据导出 (Pass Record)")
-    
-    col_p1, col_p2 = st.columns([2, 8])
-    with col_p1:
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_res.to_excel(writer, index=False, sheet_name="Market_Report")
+    df_new = pd.DataFrame(rows)[RECORD_COLUMNS]
+    df_new.to_csv(CSV_FILE, index=False, encoding="utf-8-sig", mode="a" if os.path.exists(CSV_FILE) else "w", header=not os.path.exists(CSV_FILE))
+    return True, f"成功记录 {len(rows)} 条明细"
+
+# =====================================================================
+# 5. UI 渲染与月历看板
+# =====================================================================
+df_j = load_journal()
+yesterday_d = now_myt.date() - timedelta(days=1)
+yesterday_myt_str = yesterday_d.strftime("%Y-%m-%d")
+has_10pm_p = (now_myt.hour >= 22 or now_myt.hour < 5)
+has_8am_report = yesterday_myt_str in df_j["Date_MYT"].astype(str).values if not df_j.empty else False
+
+s1, s2, s3, s4 = st.columns(4)
+s1.success("✅ 10:00 PM 战区引擎已就绪" if has_10pm_p else "⏳ 10:00 PM 战区引擎等待中")
+s2.success(f"✅ 战报已交付 ({yesterday_myt_str})" if has_8am_report else f"⏳ 战报待更新 ({yesterday_myt_str})")
+s3.info("🎯 纪律窗口：22:00 - 24:00 (MYT) | 2B + Call + Put (全战区)")
+
+with s4:
+    if st.button("🧪 执行系统全链路测试"):
+        with st.spinner("正在自检..."):
+            d1, d5, errs = fetch_raw_data_with_retry(period_5m="5d")
+            if errs: st.error("异常: " + "; ".join(errs))
+            else: st.success("自检通过：接口正常。")
+
+st.markdown("---")
+tab1, tab2 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历账本"])
+
+with tab1:
+    st.subheader("🎯 QQQ 5M 战区座舱 (含 SBR/SBR2/RBS/RBS2 & 2B)")
+    c_t1, c_t2 = st.columns(2)
+    c_t1.info("🕒 大马时间 (MYT): " + now_myt.strftime("%Y-%m-%d %H:%M:%S"))
+    c_t2.info("🇺🇸 美东时间 (ET): " + now_ny.strftime("%Y-%m-%d %H:%M:%S"))
+
+    if not has_10pm_p:
+        st.warning("🔒 处于日间准备期。大马时间 22:00 准时解锁并生成今晚 13 行战区代码。")
+    else:
+        if st.button("🔄 刷新最新点位"): st.cache_data.clear(); st.rerun()
+        d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="5d")
+        if d1h is not None:
+            p = compute_futu_13_params(d1h, d5m, now_ny)
+            if p:
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("🎯 QQQ 现价", f"${p['live_price']:.2f}")
+                m2.metric("🚦 三灯信号定调", p["BIAS_DESC"])
+                m3.metric("📈 1H EMA20 均线", f"${p['EMA20_1H']:.2f}")
+                m4.metric("📊 1H ATR 波动", f"${p['ATR_1H']:.2f}")
+
+                out_lines = [
+                    f"TREND_BIAS := {p['TREND_BIAS']};       {{ 1. QQQ三灯判定: 1=绿灯做多, -1=红灯做空, 0=黄灯防守 }}",
+                    "",
+                    "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }",
+                    f"SBR_TOP := {round(p['SBR_TOP'], 2)}; {{ 2. PRIMARY 1H 阻力顶沿 [{p['SBR_TIME']}] }}",
+                    f"SBR_BOT := {round(p['SBR_BOT'], 2)}; {{ 3. PRIMARY 1H 阻力底沿 [{p['SBR_TIME']}] }}",
+                    f"RBS_TOP := {round(p['RBS_TOP'], 2)}; {{ 4. PRIMARY 1H 支撑顶沿 [{p['RBS_TIME']}] }}",
+                    f"RBS_BOT := {round(p['RBS_BOT'], 2)}; {{ 5. PRIMARY 1H 支撑底沿 [{p['RBS_TIME']}] }}",
+                    "",
+                    "{ --- 第二梯队拓展战区 (SECONDARY ZONES) --- }",
+                    f"SBR2_TOP := {round(p['SBR2_TOP'], 2)}; {{ 6. SECONDARY 1H 更高阻力顶沿 [{p['SBR2_TIME']}] }}",
+                    f"SBR2_BOT := {round(p['SBR2_BOT'], 2)}; {{ 7. SECONDARY 1H 更高阻力底沿 [{p['SBR2_TIME']}] }}",
+                    f"RBS2_TOP := {round(p['RBS2_TOP'], 2)}; {{ 8. SECONDARY 1H 更低支撑顶沿 [{p['RBS2_TIME']}] }}",
+                    f"RBS2_BOT := {round(p['RBS2_BOT'], 2)}; {{ 9. SECONDARY 1H 更低支撑底沿 [{p['RBS2_TIME']}] }}",
+                    "",
+                    "{ --- 全市场客观极值 (SWEEP ANCHORS) --- }",
+                    f"PDH_LINE := {round(p['PDH'], 2)}; {{ 10. 昨日最高价 PDH [{p['PDH_TIME']}] }}",
+                    f"PDL_LINE := {round(p['PDL'], 2)}; {{ 11. 昨日最低价 PDL [{p['PDL_TIME']}] }}",
+                    f"PMH_LINE := {round(p['PMH'], 2)}; {{ 12. 盘前最高价 PMH [{p['PMH_TIME']}] }}",
+                    f"PML_LINE := {round(p['PML'], 2)}; {{ 13. 盘前最低价 PML [{p['PML_TIME']}] }}"
+                ]
+                st.markdown("#### 📋 复制到富途指标顶部 13 行代码 (点右上角复制):")
+                st.code("\n".join(out_lines), language="pascal")
+
+with tab2:
+    st.subheader("📅 QQQ 2B 同频月历账本 (22:00 - 24:00 MYT)")
+    col_btn1, col_btn2, col_btn3 = st.columns([1.5, 2, 1.5])
+    with col_btn1:
+        if st.button("🛠️ 结算昨夜 22:00-24:00 账本"):
+            with st.spinner("正在结算..."):
+                d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="5d")
+                target_d = now_myt.date() - timedelta(days=1)
+                dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(target_d, datetime.time(22, 0, 0)))
+                cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
+                window_end_ny = cutoff_ny + timedelta(hours=2)
+                p = compute_futu_13_params(d1h, d5m, cutoff_ny)
+                if p:
+                    trades = simulate_trades_with_2b(d5m, p, cutoff_ny, window_end_ny)
+                    ok, msg = append_to_journal(target_d.strftime("%Y-%m-%d"), p, trades)
+                    if ok: st.success(msg); st.rerun()
+                    else: st.warning(msg)
+    with col_btn2:
+        if st.button("⚡ 一键回溯补录当月所有历史交易日 (Backfill)"):
+            with st.spinner("正在回溯运算..."):
+                d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="1mo")
+                if d1h is not None and d5m is not None:
+                    dates_in_5m = sorted(list(set(d5m.index.date)))
+                    added_cnt = 0
+                    for d in dates_in_5m:
+                        if d >= now_ny.date(): continue
+                        dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(d, datetime.time(22, 0, 0)))
+                        cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
+                        window_end_ny = cutoff_ny + timedelta(hours=2)
+                        p_day = compute_futu_13_params(d1h, d5m, cutoff_ny)
+                        if p_day:
+                            trades_day = simulate_trades_with_2b(d5m, p_day, cutoff_ny, window_end_ny)
+                            ok, _ = append_to_journal(d.strftime("%Y-%m-%d"), p_day, trades_day)
+                            if ok: added_cnt += 1
+                    st.success(f"🎉 回溯完成，新增 {added_cnt} 个交易日记录！")
+                    st.rerun()
+    with col_btn3:
+        if st.button("🗑️ 清空历史账本重新生成"):
+            if os.path.exists(CSV_FILE): os.remove(CSV_FILE); st.success("账本已重置！"); st.rerun()
+
+    df_journal = load_journal()
+    if not df_journal.empty and "Date_MYT" in df_journal.columns:
+        df_journal["Date_MYT_dt"] = pd.to_datetime(df_journal["Date_MYT"]).dt.date
+        df_journal["Year"] = pd.to_datetime(df_journal["Date_MYT"]).dt.year
+        df_journal["Month"] = pd.to_datetime(df_journal["Date_MYT"]).dt.month
+    else:
+        df_journal["Year"], df_journal["Month"], df_journal["Date_MYT_dt"] = [], [], []
+
+    cy, cm, cdl = st.columns([1.5, 1.5, 2])
+    with cy: sel_y = st.selectbox("年份", options=[2025, 2026, 2027], index=1)
+    with cm: sel_m = st.selectbox("月份", options=list(range(1, 13)), index=now_myt.month - 1)
+
+    df_m = df_journal[(df_journal["Year"] == sel_y) & (df_journal["Month"] == sel_m)] if not df_journal.empty else pd.DataFrame()
+    valid_t = df_m[df_m["Signal"] != "NO_TRADE"] if not df_m.empty else pd.DataFrame()
+    tot_pts = valid_t["PnL_Points"].sum() if not valid_t.empty else 0.0
+    tot_cnt = len(valid_t)
+    w_cnt = len(valid_t[valid_t["PnL_Points"] > 0]) if not valid_t.empty else 0
+    w_rate = (w_cnt / tot_cnt * 100) if tot_cnt > 0 else 0.0
+
+    with cdl:
+        csv_bytes = df_m.to_csv(index=False).encode("utf-8-sig") if not df_m.empty else "".encode("utf-8-sig")
         st.download_button(
-            label="📥 导出今日全量复盘报表 (.xlsx)",
-            data=output.getvalue(),
-            file_name=f"QQQ_Portfolio_Report_{datetime.date.today().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            label=f"📥 导出 {sel_y}年{sel_m}月 完整账本 (.csv)",
+            data=csv_bytes, file_name=f"Futu_Full_Journal_{sel_y}_{str(sel_m).zfill(2)}.csv", mime="text/csv", disabled=df_m.empty
         )
-    
-    with col_p2:
-        btn_clear = st.button("🧹 清除缓存并强制刷新看板", type="secondary")
-        if btn_clear:
-            st.cache_data.clear()
-            st.rerun()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🗓️ 选定月份", f"{sel_y} 年 {sel_m} 月")
+    k2.metric("💰 窗口盈亏", f"{tot_pts:+.2f} pt")
+    k3.metric("🎯 窗口胜率", f"{w_rate:.1f}%", f"{w_cnt}/{tot_cnt} 胜")
+    k4.metric("📊 开仓总笔数", f"{tot_cnt} 笔")
+
+    st.markdown("---")
+    weekdays = ["周一 (Mon)", "周二 (Tue)", "周三 (Wed)", "周四 (Thu)", "周五 (Fri)", "周六 (Sat)", "周日 (Sun)"]
+    h_cols = st.columns(7)
+    for idx, hc in enumerate(h_cols): hc.markdown(f"<div style='text-align:center; font-weight:bold; color:#4a5568;'>{weekdays[idx]}</div>", unsafe_allow_html=True)
+
+    cal = calendar.monthcalendar(sel_y, sel_m)
+    for week in cal:
+        w_cols = st.columns(7)
+        for d_idx, day in enumerate(week):
+            with w_cols[d_idx]:
+                if day == 0: st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True); continue
+                cur_d = datetime.date(sel_y, sel_m, day)
+                is_weekend = (d_idx >= 5)
+                if is_weekend:
+                    st.markdown(f"<div style='background-color:#edf2f7; border-radius:8px; padding:8px; height:120px; border:1px dashed #cbd5e0; text-align:center;'><div style='font-size:13px; color:#a0aec0; text-align:left;'><b>{day}</b></div><div style='font-size:18px; margin-top:10px;'>❌</div><div style='font-size:11px; color:#a0aec0;'>周末休市</div></div>", unsafe_allow_html=True)
+                else:
+                    d_recs = df_m[df_m["Date_MYT_dt"] == cur_d] if not df_m.empty else pd.DataFrame()
+                    if not d_recs.empty:
+                        r_t = d_recs[d_recs["Signal"] != "NO_TRADE"]
+                        cnt = len(r_t); pts = r_t["PnL_Points"].sum() if not r_t.empty else 0.0
+                        b_val = d_recs.iloc[0].get("TREND_BIAS", 0)
+                        b_str = "多" if b_val == 1 else ("空" if b_val == -1 else "黄灯")
+                        if cnt == 0:
+                            st.markdown(f"<div style='background-color:#f7fafc; border-radius:8px; padding:8px; height:120px; border:1px solid #e2e8f0; text-align:center;'><div style='font-size:13px; color:#718096; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:#a0aec0;'>({b_str})</span></div><div style='font-size:12px; color:#718096; margin-top:15px;'>⚪ 未触及战区</div><div style='font-size:10px; color:#a0aec0;'>空仓休战</div></div>", unsafe_allow_html=True)
+                        else:
+                            bg = "#e6fffa" if pts >= 0 else "#fff5f5"
+                            bd = "#38b2ac" if pts >= 0 else "#e53e3e"
+                            tc = "#234e52" if pts >= 0 else "#742a2a"
+                            sgn = "+" if pts > 0 else ""
+                            st.markdown(f"<div style='background-color:{bg}; border-radius:8px; padding:8px; height:120px; border:2px solid {bd}; text-align:center;'><div style='font-size:13px; color:{tc}; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:{bd};'>({b_str})</span></div><div style='font-size:15px; font-weight:bold; color:{bd}; margin-top:2px;'>{sgn}{pts:.2f} pt</div><div style='font-size:11px; color:{tc};'>{cnt} 笔交易 (22-24点)</div></div>", unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<div style='background-color:#ffffff; border-radius:8px; padding:8px; height:120px; border:1px solid #edf2f7; text-align:center;'><div style='font-size:13px; color:#cbd5e0; text-align:left;'><b>{day}</b></div><div style='font-size:11px; color:#cbd5e0; margin-top:25px;'>-</div></div>", unsafe_allow_html=True)
+
+    with st.expander("🔍 展开查看完整明细表 (Full Data Table)"):
+        if not df_m.empty: st.dataframe(df_m.drop(columns=["Date_MYT_dt", "Year", "Month"], errors="ignore"), use_container_width=True)
+        else: st.info("当月暂无交易明细。")
