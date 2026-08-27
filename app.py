@@ -26,7 +26,7 @@ now_myt = datetime.datetime.now(tz_myt)
 now_ny = datetime.datetime.now(tz_ny)
 
 # =====================================================================
-# 2. 数据抓取引擎 (带重试保护与多源切换)
+# 2. 数据抓取引擎 (带重试保护)
 # =====================================================================
 def fetch_raw_data_with_retry(max_retries=3):
     df_1h, source_1h = None, "None"
@@ -34,7 +34,6 @@ def fetch_raw_data_with_retry(max_retries=3):
     err_log = []
     start_date = (datetime.datetime.now() - timedelta(days=45)).strftime("%Y-%m-%d")
 
-    # 1H 数据拉取 (Tiingo 优先)
     for attempt in range(max_retries):
         url = f"https://api.tiingo.com/iex/{TICKER}/prices?startDate={start_date}&resampleFreq=1hour&token={TIINGO_TOKEN}&columns=open,high,low,close,volume"
         try:
@@ -54,7 +53,6 @@ def fetch_raw_data_with_retry(max_retries=3):
             err_log.append(f"Tiingo 1H 尝试 {attempt+1} 失败: {str(e)}")
             time.sleep(1)
 
-    # 1H 兜底 (YahooFinance)
     if df_1h is None:
         try:
             df_yf = yf.download(TICKER, period="1mo", interval="1h", prepost=True, progress=False)
@@ -67,7 +65,6 @@ def fetch_raw_data_with_retry(max_retries=3):
         except Exception as e:
             err_log.append(f"YahooFinance 1H 失败: {str(e)}")
 
-    # 5M 数据拉取 (YahooFinance)
     for attempt in range(max_retries):
         try:
             df_5m_raw = yf.download(TICKER, period="5d", interval="5m", prepost=True, progress=False)
@@ -85,7 +82,7 @@ def fetch_raw_data_with_retry(max_retries=3):
     return df_1h, source_1h, df_5m, source_5m, err_log
 
 # =====================================================================
-# 3. 核心运算：10 PM 参数生成与 5M 信号复盘引擎
+# 3. 核心运算：10 PM 参数生成与 5M 信号复盘
 # =====================================================================
 def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     if df_1h is None:
@@ -392,10 +389,10 @@ with tab1:
                 m_c2.metric("🧭 宏观定调", b_desc)
                 m_c3.metric("📊 趋势得分", f"{p['TOTAL_SCORE']} / 3")
 
-                # 用结构化列表逐行组装，彻底杜绝单行过长截断与引号语法错误
-                lines = [
-                    f"TREND_BIAS := {p['TREND_BIAS']};       {{ 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: {p['TOTAL_SCORE']}] }}",
-                    "",
-                    "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }",
-                    f"SBR_TOP := {p['SBR_TOP']:.2f}; {{ 2. PRIMARY 1H 阻力顶沿 [{p['SBR_TIME']}] }}",
-        
+                # 单一模板安全填充，杜绝任何截断和未闭合符号问题
+                tpl = (
+                    "TREND_BIAS := {bias};       {{ 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: {score}] }}\n\n"
+                    "{{ --- 第一梯队主战区 (PRIMARY ZONES) --- }}\n"
+                    "SBR_TOP := {sbr_top:.2f}; {{ 2. PRIMARY 1H 阻力顶沿 [{sbr_t}] }}\n"
+                    "SBR_BOT := {sbr_bot:.2f}; {{ 3. PRIMARY 1H 阻力底沿 [{sbr_t}] }}\n"
+                    "RBS_TOP := {rbs_top:.2f}; {{ 4. PRIMARY 1H 支撑顶沿 [{rb
