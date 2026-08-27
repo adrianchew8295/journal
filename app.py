@@ -171,7 +171,7 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     trades = []
     if p is None or df_5m is None: return trades, None
 
-    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=3)) & (df_5m.index <= window_end_ny)].copy()
+    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=3)) & (df_5m.index <= window_end_ny + timedelta(minutes=15))].copy()
     if len(day_5m) < 25: return trades, None
 
     weights = np.arange(1, 21)
@@ -224,10 +224,10 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     buy_std_confirmed = std_buy_setup.shift(1) & (day_5m["High"] > day_5m["High"].shift(1)) & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"] > day_5m["LWMA20"]) & vol_heavy_or_ref1
     sell_std_confirmed = std_sell_setup.shift(1) & (day_5m["Low"] < day_5m["Low"].shift(1)) & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"] < day_5m["LWMA20"]) & vol_heavy_or_ref1
 
-    buy_2b_sig = (bias >= 0) & buy_2b_confirmed & (buy_2b_confirmed.rolling(5).sum() == 1)
-    sell_2b_sig = (bias <= 0) & sell_2b_confirmed & (sell_2b_confirmed.rolling(5).sum() == 1)
-    buy_std_sig = (bias >= 0) & buy_std_confirmed & (buy_std_confirmed.rolling(5).sum() == 1)
-    sell_std_sig = (bias <= 0) & sell_std_confirmed & (sell_std_confirmed.rolling(5).sum() == 1)
+    day_5m["BUY_2B_SIG"] = (bias >= 0) & buy_2b_confirmed & (buy_2b_confirmed.rolling(5).sum() == 1)
+    day_5m["SELL_2B_SIG"] = (bias <= 0) & sell_2b_confirmed & (sell_2b_confirmed.rolling(5).sum() == 1)
+    day_5m["BUY_STD_SIG"] = (bias >= 0) & buy_std_confirmed & (buy_std_confirmed.rolling(5).sum() == 1) & (~day_5m["BUY_2B_SIG"])
+    day_5m["SELL_STD_SIG"] = (bias <= 0) & sell_std_confirmed & (sell_std_confirmed.rolling(5).sum() == 1) & (~day_5m["SELL_2B_SIG"])
 
     in_pos, pos_type = False, 0
     entry_p, sl_p, tp_p = 0.0, 0.0, 0.0
@@ -249,7 +249,7 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
 
         if in_pos:
             exit_flag, reason, exit_p = False, "", 0.0
-            exit_time_ny = cur_t_ny + timedelta(minutes=5)
+            exit_time_ny = cur_t_ny
             
             if pos_type == 1:
                 if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
@@ -276,10 +276,10 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                 break
 
         if not in_pos and daily_trade_count == 0 and cur_t_ny < (window_end_ny - timedelta(minutes=15)):
-            is_b2b = bool(buy_2b_sig.iloc[i])
-            is_s2b = bool(sell_2b_sig.iloc[i])
-            is_bstd = bool(buy_std_sig.iloc[i]) and not is_b2b
-            is_sstd = bool(sell_std_sig.iloc[i]) and not is_s2b
+            is_b2b = bool(day_5m["BUY_2B_SIG"].iloc[i])
+            is_s2b = bool(day_5m["SELL_2B_SIG"].iloc[i])
+            is_bstd = bool(day_5m["BUY_STD_SIG"].iloc[i])
+            is_sstd = bool(day_5m["SELL_STD_SIG"].iloc[i])
 
             sl_dist = 0.5 * atr_v
             tp_dist = 1.0 * atr_v
@@ -289,14 +289,14 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                 entry_p = c
                 sl_p = c - sl_dist
                 tp_p = c + tp_dist
-                entry_time_ny = cur_t_ny + timedelta(minutes=5)
+                entry_time_ny = cur_t_ny
                 futu_signal_tag = "▲▲ 2B 多" if is_b2b else "▲ CALL 多"
             elif is_s2b or is_sstd:
                 in_pos, pos_type = True, -1
                 entry_p = c
                 sl_p = c + sl_dist
                 tp_p = c - tp_dist
-                entry_time_ny = cur_t_ny + timedelta(minutes=5)
+                entry_time_ny = cur_t_ny
                 futu_signal_tag = "▼▼ 2B 空" if is_s2b else "▼ PUT 空"
 
     return trades, day_5m
@@ -544,7 +544,6 @@ with tab3:
         if p:
             trades, day_5m = simulate_trades_with_2b(d5m, p, cutoff_ny, window_end_ny)
             
-            # 顶部关键参数看板
             tc1, tc2, tc3, tc4 = st.columns(4)
             tc1.metric("🚦 昨夜三灯方向", p["BIAS_DESC"])
             tc2.metric("📈 1H EMA20 战区", f"${p['EMA20_1H']:.2f}")
@@ -560,72 +559,162 @@ with tab3:
             else:
                 tc4.metric("🎯 昨夜战果", "⚪ 未触发信号", "空仓观望")
 
-            # 交易明细核验表
             st.markdown("#### 📋 昨夜执行明细核验 (0.5 ATR 止损 / 1:2 止盈)")
             if trades:
                 t_df = pd.DataFrame(trades)
-                # 过滤掉内部用的 DT 列
                 show_cols = [c for c in t_df.columns if not c.endswith("_DT_NY")]
                 st.table(t_df[show_cols])
             else:
                 st.info("昨夜 22:00 - 24:00 (MYT) 价格未触及战区准入条件或未形成标准 2B / 吞没形态，按纪律未开仓。")
 
-            # 5M 战场 K 线图表与信号标记
-            st.markdown("#### 📊 5M 战场执行结构全景图 (含战区阻力支撑与买卖信号)")
+            st.markdown("#### 📊 5M 战场执行结构全景图 (含 CALL / PUT / 2B 信号标记)")
             
-            # 取窗口期前后 5M K线
             dt_view_start = dt_10pm_myt - timedelta(minutes=30)
             dt_view_end = dt_10pm_myt + timedelta(hours=2, minutes=15)
             start_ny_view = dt_view_start.astimezone(tz_ny)
             end_ny_view = dt_view_end.astimezone(tz_ny)
             
-            chart_df = d5m[(d5m.index >= start_ny_view) & (d5m.index <= end_ny_view)].copy()
-            
-            if not chart_df.empty:
-                chart_df["MYT_Time"] = chart_df.index.tz_convert(tz_myt)
+            if day_5m is not None:
+                chart_df = day_5m[(day_5m.index >= start_ny_view) & (day_5m.index <= end_ny_view)].copy()
                 
-                fig = go.Figure()
-                
-                # 5M K线
-                fig.add_trace(go.Candlestick(
-                    x=chart_df["MYT_Time"],
-                    open=chart_df['Open'], high=chart_df['High'],
-                    low=chart_df['Low'], close=chart_df['Close'],
-                    name="5M K线"
-                ))
-                
-                # 绘制战区线
-                if p["SBR_BOT"] > 0:
-                    fig.add_hline(y=p["SBR_BOT"], line_dash="dash", line_color="#f56565", annotation_text=f"SBR 阻力底: {p['SBR_BOT']:.2f}")
-                if p["RBS_TOP"] > 0:
-                    fig.add_hline(y=p["RBS_TOP"], line_dash="dash", line_color="#48bb78", annotation_text=f"RBS 支撑顶: {p['RBS_TOP']:.2f}")
-                if p["PDH"] > 0:
-                    fig.add_hline(y=p["PDH"], line_dash="dot", line_color="#ed8936", annotation_text=f"昨日高 PDH: {p['PDH']:.2f}")
-                if p["PDL"] > 0:
-                    fig.add_hline(y=p["PDL"], line_dash="dot", line_color="#4299e1", annotation_text=f"昨日低 PDL: {p['PDL']:.2f}")
-
-                # 标记交易信号
-                if trades:
-                    tr = trades[0]
-                    ep = tr["Entry_Price"]
-                    xp = tr["Exit_Price"]
-                    sl = tr["SL"]
-                    tp = tr["TP"]
+                if not chart_df.empty:
+                    chart_df["MYT_Time"] = chart_df.index.tz_convert(tz_myt)
                     
-                    fig.add_hline(y=ep, line_color="#ecc94b", line_width=2, annotation_text=f"进场金线: {ep}")
-                    fig.add_hline(y=sl, line_dash="dash", line_color="#e53e3e", annotation_text=f"止损 (0.5 ATR): {sl}")
-                    fig.add_hline(y=tp, line_dash="dash", line_color="#38a169", annotation_text=f"目标 TP (1:2): {tp}")
+                    fig = go.Figure()
+                    
+                    # 1. 5M K线
+                    fig.add_trace(go.Candlestick(
+                        x=chart_df["MYT_Time"],
+                        open=chart_df['Open'], high=chart_df['High'],
+                        low=chart_df['Low'], close=chart_df['Close'],
+                        name="5M K线"
+                    ))
+                    
+                    # 2. 均线
+                    fig.add_trace(go.Scatter(
+                        x=chart_df["MYT_Time"], y=chart_df["LWMA20"],
+                        line=dict(color="orange", width=1.2),
+                        name="LWMA 20"
+                    ))
 
-                fig.update_layout(
-                    title=f"昨夜 5M 战场回放 | 战区判定与执行核验",
-                    xaxis_rangeslider_visible=False,
-                    height=520,
-                    margin=dict(l=10, r=10, t=40, b=10),
-                    template="plotly_dark"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("暂未获取到昨夜窗口期的 5M K线数据。")
+                    # 3. 扫描到的 CALL / PUT / 2B 信号点打在图上
+                    annotations = []
+
+                    # 扫描多头 2B 信号
+                    b2b_df = chart_df[chart_df["BUY_2B_SIG"] == True]
+                    for idx_row, row in b2b_df.iterrows():
+                        annotations.append(dict(
+                            x=row["MYT_Time"], y=row["Low"],
+                            xref="x", yref="y",
+                            text="▲▲ 2B 多 (CALL)",
+                            showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2,
+                            arrowcolor="#00e676",
+                            ax=0, ay=35,
+                            font=dict(color="#00e676", size=11, family="Arial Black")
+                        ))
+
+                    # 扫描标准 CALL 多头信号 (吞没/孕线/123)
+                    bstd_df = chart_df[chart_df["BUY_STD_SIG"] == True]
+                    for idx_row, row in bstd_df.iterrows():
+                        annotations.append(dict(
+                            x=row["MYT_Time"], y=row["Low"],
+                            xref="x", yref="y",
+                            text="▲ CALL 多",
+                            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.5,
+                            arrowcolor="#69f0ae",
+                            ax=0, ay=30,
+                            font=dict(color="#69f0ae", size=10)
+                        ))
+
+                    # 扫描空头 2B 信号
+                    s2b_df = chart_df[chart_df["SELL_2B_SIG"] == True]
+                    for idx_row, row in s2b_df.iterrows():
+                        annotations.append(dict(
+                            x=row["MYT_Time"], y=row["High"],
+                            xref="x", yref="y",
+                            text="▼▼ 2B 空 (PUT)",
+                            showarrow=True, arrowhead=2, arrowsize=1.2, arrowwidth=2,
+                            arrowcolor="#ff5252",
+                            ax=0, ay=-35,
+                            font=dict(color="#ff5252", size=11, family="Arial Black")
+                        ))
+
+                    # 扫描标准 PUT 空头信号
+                    sstd_df = chart_df[chart_df["SELL_STD_SIG"] == True]
+                    for idx_row, row in sstd_df.iterrows():
+                        annotations.append(dict(
+                            x=row["MYT_Time"], y=row["High"],
+                            xref="x", yref="y",
+                            text="▼ PUT 空",
+                            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.5,
+                            arrowcolor="#ff8a80",
+                            ax=0, ay=-30,
+                            font=dict(color="#ff8a80", size=10)
+                        ))
+
+                    # 4. 实际成交入场与平仓标记 (带框大标)
+                    if trades:
+                        tr = trades[0]
+                        ep = tr["Entry_Price"]
+                        xp = tr["Exit_Price"]
+                        sl = tr["SL"]
+                        tp = tr["TP"]
+                        en_myt = tr["Entry_DT_NY"].astimezone(tz_myt)
+                        ex_myt = tr["Exit_DT_NY"].astimezone(tz_myt)
+
+                        # 入场大标
+                        is_buy = "多" in tr["Signal"] or "CALL" in tr["Signal"]
+                        tag_color = "#00e676" if is_buy else "#ff5252"
+                        annotations.append(dict(
+                            x=en_myt, y=ep,
+                            xref="x", yref="y",
+                            text=f"🚀 开仓入场: {ep}",
+                            showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=2.5,
+                            arrowcolor="#ffd700",
+                            ax=0, ay=45 if is_buy else -45,
+                            bordercolor="#ffd700", borderwidth=1.5, borderpad=3,
+                            bgcolor="#1a202c",
+                            font=dict(color="#ffd700", size=11, family="Arial Black")
+                        ))
+
+                        # 离场大标
+                        annotations.append(dict(
+                            x=ex_myt, y=xp,
+                            xref="x", yref="y",
+                            text=f"🏁 平仓 ({tr['Reason']}): {xp}",
+                            showarrow=True, arrowhead=3, arrowsize=1.5, arrowwidth=2.5,
+                            arrowcolor="#ffffff",
+                            ax=0, ay=-45 if is_buy else 45,
+                            bordercolor="#ffffff", borderwidth=1.5, borderpad=3,
+                            bgcolor="#1a202c",
+                            font=dict(color="#ffffff", size=11, family="Arial Black")
+                        ))
+
+                        fig.add_hline(y=ep, line_color="#ffd700", line_width=2, annotation_text=f"进场金线: {ep}")
+                        fig.add_hline(y=sl, line_dash="dash", line_color="#ff5252", annotation_text=f"止损 (0.5 ATR): {sl}")
+                        fig.add_hline(y=tp, line_dash="dash", line_color="#00e676", annotation_text=f"目标 TP (1:2): {tp}")
+
+                    # 5. 战区线
+                    if p["SBR_BOT"] > 0:
+                        fig.add_hline(y=p["SBR_BOT"], line_dash="dash", line_color="#f56565", annotation_text=f"SBR 阻力底: {p['SBR_BOT']:.2f}")
+                    if p["RBS_TOP"] > 0:
+                        fig.add_hline(y=p["RBS_TOP"], line_dash="dash", line_color="#48bb78", annotation_text=f"RBS 支撑顶: {p['RBS_TOP']:.2f}")
+                    if p["PDH"] > 0:
+                        fig.add_hline(y=p["PDH"], line_dash="dot", line_color="#ed8936", annotation_text=f"昨日高 PDH: {p['PDH']:.2f}")
+                    if p["PDL"] > 0:
+                        fig.add_hline(y=p["PDL"], line_dash="dot", line_color="#4299e1", annotation_text=f"昨日低 PDL: {p['PDL']:.2f}")
+
+                    fig.update_layout(
+                        title=f"昨夜 5M 战场回放 | CALL/PUT 信号扫描与实际执行",
+                        xaxis_rangeslider_visible=False,
+                        height=560,
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        template="plotly_dark",
+                        annotations=annotations
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("暂未获取到昨夜窗口期的 5M K线数据。")
         else:
             st.error("计算昨夜 13 行战区参数失败，请检查数据完整性。")
     else:
