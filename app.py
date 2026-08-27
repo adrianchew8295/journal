@@ -77,7 +77,7 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
     return df_1h, df_5m, err_log
 
 # =====================================================================
-# 3. 核心运算：100% 对齐富途 13 行与 2B/全战区回测
+# 3. 核心运算：富途 13 行参数抽取
 # =====================================================================
 def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     if df_1h is None: return None
@@ -134,9 +134,6 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     rbs_top, rbs_bot, rbs_time = valid_lows[0] if len(valid_lows) >= 1 else (live_price - 0.6 * atr, live_price - 1.2 * atr, "Range Low")
     rbs2_top, rbs2_bot, rbs2_time = valid_lows[1] if len(valid_lows) >= 2 else (rbs_bot - 0.5 * atr, rbs_bot - 1.2 * atr, "Tier-2 Low")
 
-    # =====================================================================
-    # 严格三维共振定调算法 (100% 对齐原版脚本)
-    # =====================================================================
     ema20_now = float(sub_1h["EMA20"].iloc[-1])
     sma50_now = float(sub_1h["SMA50"].iloc[-1]) if not np.isnan(sub_1h["SMA50"].iloc[-1]) else ema20_now
     score_ma = 1 if (live_price > ema20_now and ema20_now >= sma50_now) else (-1 if (live_price < ema20_now and ema20_now <= sma50_now) else 0)
@@ -166,16 +163,80 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
         "PMH": pmh_val, "PMH_TIME": pmh_time, "PML": pml_val, "PML_TIME": pml_time
     }
 
+# =====================================================================
+# 4. 100% 完整对齐富途指标 Pascal 逻辑的 5M 回测引擎
+# =====================================================================
 def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     trades = []
     if p is None or df_5m is None: return trades
 
-    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=1)) & (df_5m.index <= window_end_ny)].copy()
-    if len(day_5m) < 15: return trades
+    # 预留至少 30 根 K 线计算指标 (LWMA20, ATR14, VOL_MA)
+    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=3)) & (df_5m.index <= window_end_ny)].copy()
+    if len(day_5m) < 25: return trades
 
-    tr_5m = np.maximum(day_5m["High"] - day_5m["Low"], np.maximum((day_5m["High"] - day_5m["Close"].shift(1)).abs(), (day_5m["Low"] - day_5m["Close"].shift(1)).abs()))
-    day_5m["ATR14"] = tr_5m.rolling(14).mean()
+    # 4.1 PART 3 指标矩阵 (LWMA20, ATR14, VOL_MA)
+    weights = np.arange(1, 21)
+    day_5m["LWMA20"] = day_5m["Close"].rolling(20).apply(lambda prices: np.dot(prices, weights) / weights.sum(), raw=True)
+    
+    tr = np.maximum(day_5m["High"] - day_5m["Low"], np.maximum((day_5m["High"] - day_5m["Close"].shift(1)).abs(), (day_5m["Low"] - day_5m["Close"].shift(1)).abs()))
+    day_5m["ATR14"] = tr.rolling(14).mean()
+    day_5m["VOL_MA"] = day_5m["Volume"].rolling(20).mean()
+    day_5m["VOL_HEAVY"] = day_5m["Volume"] >= 1.25 * day_5m["VOL_MA"]
 
+    # 4.2 提取战区常数
+    rbs_top, rbs_bot = p["RBS_TOP"], p["RBS_BOT"]
+    rbs2_top, rbs2_bot = p["RBS2_TOP"], p["RBS2_BOT"]
+    sbr_top, sbr_bot = p["SBR_TOP"], p["SBR_BOT"]
+    sbr2_top, sbr2_bot = p["SBR2_TOP"], p["SBR2_BOT"]
+    pdl_line, pdh_line = p["PDL"], p["PDH"]
+    pml_line, pmh_line = p["PML"], p["PMH"]
+    bias = p["TREND_BIAS"]
+
+    # 4.3 向量化计算 PART 4 战区准入
+    in_rbs1 = (day_5m["Low"] <= rbs_top) & (day_5m["Close"] >= rbs_bot)
+    in_rbs2 = (rbs2_top > 0) & (day_5m["Low"] <= rbs2_top) & (day_5m["Close"] >= rbs2_bot)
+    in_sbr1 = (day_5m["High"] >= sbr_bot) & (day_5m["Close"] <= sbr_top)
+    in_sbr2 = (sbr2_top > 0) & (day_5m["High"] >= sbr2_bot) & (day_5m["Close"] <= sbr2_top)
+
+    buy_zone = in_rbs1 | in_rbs2 | ((day_5m["Low"] <= pdl_line) & (day_5m["Close"] > pdl_line)) | ((day_5m["Low"] <= pml_line) & (day_5m["Close"] > pml_line))
+    sell_zone = in_sbr1 | in_sbr2 | ((day_5m["High"] >= pdh_line) & (day_5m["Close"] < pdh_line)) | ((day_5m["High"] >= pmh_line) & (day_5m["Close"] < pmh_line))
+
+    # 4.4 向量化计算 PART 5 原始形态池 (RAW SETUPS)
+    llv5_ref1 = day_5m["Low"].rolling(5).min().shift(1)
+    hhv5_ref1 = day_5m["High"].rolling(5).max().shift(1)
+
+    bull_2b_raw = ((day_5m["Low"] < llv5_ref1) | (day_5m["Low"] < pdl_line) | (day_5m["Low"] < pml_line)) & (day_5m["Close"] > llv5_ref1) & (day_5m["Close"] > day_5m["Open"])
+    bear_2b_raw = ((day_5m["High"] > hhv5_ref1) | (day_5m["High"] > pdh_line) | (day_5m["High"] > pmh_line)) & (day_5m["Close"] < hhv5_ref1) & (day_5m["Close"] < day_5m["Open"])
+
+    # 战区标准形态 (吞没 / 晨昏星 / 123)
+    bull_engulf_raw = buy_zone & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"].shift(1) < day_5m["Open"].shift(1)) & (day_5m["Close"] >= day_5m["Open"].shift(1)) & (day_5m["Open"] <= day_5m["Close"].shift(1))
+    bear_engulf_raw = sell_zone & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"].shift(1) > day_5m["Open"].shift(1)) & (day_5m["Close"] <= day_5m["Open"].shift(1)) & (day_5m["Open"] >= day_5m["Close"].shift(1))
+
+    bull_star_raw = buy_zone & (day_5m["Close"].shift(2) < day_5m["Open"].shift(2)) & ((day_5m["Close"].shift(1) - day_5m["Open"].shift(1)).abs() <= 0.35 * (day_5m["High"].shift(1) - day_5m["Low"].shift(1))) & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"] >= (day_5m["Open"].shift(2) + day_5m["Close"].shift(2)) / 2)
+    bear_star_raw = sell_zone & (day_5m["Close"].shift(2) > day_5m["Open"].shift(2)) & ((day_5m["Close"].shift(1) - day_5m["Open"].shift(1)).abs() <= 0.35 * (day_5m["High"].shift(1) - day_5m["Low"].shift(1))) & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"] <= (day_5m["Open"].shift(2) + day_5m["Close"].shift(2)) / 2)
+
+    bull_123_raw = buy_zone & (day_5m["Close"] > day_5m["LWMA20"]) & (day_5m["Close"].shift(1) <= day_5m["LWMA20"].shift(1)) & (day_5m["Low"] > llv5_ref1) & (day_5m["Close"] > day_5m["Open"])
+    bear_123_raw = sell_zone & (day_5m["Close"] < day_5m["LWMA20"]) & (day_5m["Close"].shift(1) >= day_5m["LWMA20"].shift(1)) & (day_5m["High"] < hhv5_ref1) & (day_5m["Close"] < day_5m["Open"])
+
+    std_buy_setup = bull_engulf_raw | bull_star_raw | bull_123_raw
+    std_sell_setup = bear_engulf_raw | bear_star_raw | bear_123_raw
+
+    # 4.5 PART 6 右侧二次确认与放量硬锁 (CONFIRMED)
+    vol_heavy_or_ref1 = day_5m["VOL_HEAVY"] | day_5m["VOL_HEAVY"].shift(1)
+    
+    buy_2b_confirmed = bull_2b_raw.shift(1) & (day_5m["High"] > day_5m["High"].shift(1)) & (day_5m["Close"] > day_5m["Open"]) & vol_heavy_or_ref1
+    sell_2b_confirmed = bear_2b_raw.shift(1) & (day_5m["Low"] < day_5m["Low"].shift(1)) & (day_5m["Close"] < day_5m["Open"]) & vol_heavy_or_ref1
+
+    buy_std_confirmed = std_buy_setup.shift(1) & (day_5m["High"] > day_5m["High"].shift(1)) & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"] > day_5m["LWMA20"]) & vol_heavy_or_ref1
+    sell_std_confirmed = std_sell_setup.shift(1) & (day_5m["Low"] < day_5m["Low"].shift(1)) & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"] < day_5m["LWMA20"]) & vol_heavy_or_ref1
+
+    # 防重开信号 (COUNT(CONFIRMED, 5) == 1)
+    buy_2b_sig = (bias >= 0) & buy_2b_confirmed & (buy_2b_confirmed.rolling(5).sum() == 1)
+    sell_2b_sig = (bias <= 0) & sell_2b_confirmed & (sell_2b_confirmed.rolling(5).sum() == 1)
+    buy_std_sig = (bias >= 0) & buy_std_confirmed & (buy_std_confirmed.rolling(5).sum() == 1)
+    sell_std_sig = (bias <= 0) & sell_std_confirmed & (sell_std_confirmed.rolling(5).sum() == 1)
+
+    # 4.6 模拟开平仓执行
     in_pos, pos_type = False, 0
     entry_p, sl_p, tp_p = 0.0, 0.0, 0.0
     entry_time_ny = None
@@ -190,7 +251,7 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
 
     for i in range(start_idx, len(day_5m)):
         cur_t_ny = day_5m.index[i]
-        c, o, h, l = day_5m["Close"].iloc[i], day_5m["Open"].iloc[i], day_5m["High"].iloc[i], day_5m["Low"].iloc[i]
+        c, h, l = day_5m["Close"].iloc[i], day_5m["High"].iloc[i], day_5m["Low"].iloc[i]
         atr_v = day_5m["ATR14"].iloc[i] if not np.isnan(day_5m["ATR14"].iloc[i]) else 0.8
         is_window_close = (cur_t_ny >= window_end_ny - timedelta(minutes=5))
 
@@ -220,51 +281,32 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                 break
 
         if not in_pos and daily_trade_count == 0 and cur_t_ny < (window_end_ny - timedelta(minutes=15)):
-            bias = p["TREND_BIAS"]
-            prev_c, prev_o = day_5m["Close"].iloc[i-1], day_5m["Open"].iloc[i-1]
-            prev_h, prev_l = day_5m["High"].iloc[i-1], day_5m["Low"].iloc[i-1]
+            is_b2b = bool(buy_2b_sig.iloc[i])
+            is_s2b = bool(sell_2b_sig.iloc[i])
+            is_bstd = bool(buy_std_sig.iloc[i]) and not is_b2b
+            is_sstd = bool(sell_std_sig.iloc[i]) and not is_s2b
 
-            # 完整覆盖：第一梯队 RBS/SBR、第二梯队 RBS2/SBR2、PDH/PDL、PMH/PML
-            near_support = (
-                (prev_l <= p["RBS_TOP"] and prev_c >= p["RBS_BOT"]) or
-                (prev_l <= p["RBS2_TOP"] and prev_c >= p["RBS2_BOT"]) or
-                (prev_l <= p["PDL"] and prev_c > p["PDL"]) or
-                (prev_l <= p["PML"] and prev_c > p["PML"])
-            )
-            near_resistance = (
-                (prev_h >= p["SBR_BOT"] and prev_c <= p["SBR_TOP"]) or
-                (prev_h >= p["SBR2_BOT"] and prev_c <= p["SBR2_TOP"]) or
-                (prev_h >= p["PDH"] and prev_c < p["PDH"]) or
-                (prev_h >= p["PMH"] and prev_c < p["PMH"])
-            )
-
-            llv5 = day_5m["Low"].iloc[max(0, i-5):i].min()
-            hhv5 = day_5m["High"].iloc[max(0, i-5):i].max()
-
-            b_2b = (prev_l < llv5 or prev_l <= p["PDL"] or prev_l <= p["PML"] or prev_l <= p["RBS_BOT"] or prev_l <= p["RBS2_BOT"]) and (prev_c > prev_o) and (prev_c > llv5)
-            s_2b = (prev_h > hhv5 or prev_h >= p["PDH"] or prev_h >= p["PMH"] or prev_h >= p["SBR_TOP"] or prev_h >= p["SBR2_TOP"]) and (prev_c < prev_o) and (prev_c < hhv5)
-
-            stop_buffer = max(0.5 * atr_v, 1.2)
-
-            if (bias == 1 or bias == 0) and (b_2b or (near_support and prev_c > prev_o)):
+            if is_b2b or is_bstd:
                 in_pos, pos_type = True, 1
                 entry_p = c
-                sl_p = min(prev_l, l) - stop_buffer
+                # 严格对齐 PART 8 止损: LOW - 0.15 * ATR14
+                sl_p = l - 0.15 * atr_v
                 tp_p = c + 2.0 * (c - sl_p)
                 entry_time_ny = cur_t_ny
-                futu_signal_tag = "▲▲ 2B" if b_2b else "▲ CALL"
-            elif (bias == -1 or bias == 0) and (s_2b or (near_resistance and prev_c < prev_o)):
+                futu_signal_tag = "▲▲ 2B" if is_b2b else "▲ CALL"
+            elif is_s2b or is_sstd:
                 in_pos, pos_type = True, -1
                 entry_p = c
-                sl_p = max(prev_h, h) + stop_buffer
+                # 严格对齐 PART 8 止损: HIGH + 0.15 * ATR14
+                sl_p = h + 0.15 * atr_v
                 tp_p = c - 2.0 * (sl_p - c)
                 entry_time_ny = cur_t_ny
-                futu_signal_tag = "▼▼ 2B" if s_2b else "▼ PUT"
+                futu_signal_tag = "▼▼ 2B" if is_s2b else "▼ PUT"
 
     return trades
 
 # =====================================================================
-# 4. 账本存储
+# 5. 账本存储
 # =====================================================================
 RECORD_COLUMNS = [
     "Date_MYT", "TREND_BIAS", "EMA20_1H", "ATR_1H", "SBR_TOP", "SBR_BOT", "RBS_TOP", "RBS_BOT",
@@ -309,7 +351,7 @@ def append_to_journal(date_str, params, trades):
     return True, f"成功记录 {len(rows)} 条明细"
 
 # =====================================================================
-# 5. UI 渲染与月历看板
+# 6. UI 渲染与月历看板
 # =====================================================================
 df_j = load_journal()
 yesterday_d = now_myt.date() - timedelta(days=1)
