@@ -77,7 +77,7 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
     return df_1h, df_5m, err_log
 
 # =====================================================================
-# 3. 核心运算：100% 对齐富途 13 行与 2B/战区回测
+# 3. 核心运算：100% 对齐富途 13 行与 2B/全战区回测
 # =====================================================================
 def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     if df_1h is None: return None
@@ -213,14 +213,25 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
             prev_c, prev_o = day_5m["Close"].iloc[i-1], day_5m["Open"].iloc[i-1]
             prev_h, prev_l = day_5m["High"].iloc[i-1], day_5m["Low"].iloc[i-1]
 
-            near_support = (prev_l <= p["RBS_TOP"] and prev_c >= p["RBS_BOT"]) or (prev_l <= p["PDL"] and prev_c > p["PDL"]) or (prev_l <= p["PML"] and prev_c > p["PML"])
-            near_resistance = (prev_h >= p["SBR_BOT"] and prev_c <= p["SBR_TOP"]) or (prev_h >= p["PDH"] and prev_c < p["PDH"]) or (prev_h >= p["PMH"] and prev_c < p["PMH"])
+            # 完整覆盖：第一梯队 RBS/SBR、第二梯队 RBS2/SBR2、PDH/PDL、PMH/PML
+            near_support = (
+                (prev_l <= p["RBS_TOP"] and prev_c >= p["RBS_BOT"]) or
+                (prev_l <= p["RBS2_TOP"] and prev_c >= p["RBS2_BOT"]) or
+                (prev_l <= p["PDL"] and prev_c > p["PDL"]) or
+                (prev_l <= p["PML"] and prev_c > p["PML"])
+            )
+            near_resistance = (
+                (prev_h >= p["SBR_BOT"] and prev_c <= p["SBR_TOP"]) or
+                (prev_h >= p["SBR2_BOT"] and prev_c <= p["SBR2_TOP"]) or
+                (prev_h >= p["PDH"] and prev_c < p["PDH"]) or
+                (prev_h >= p["PMH"] and prev_c < p["PMH"])
+            )
 
             llv5 = day_5m["Low"].iloc[max(0, i-5):i].min()
             hhv5 = day_5m["High"].iloc[max(0, i-5):i].max()
 
-            b_2b = (prev_l < llv5 or prev_l <= p["PDL"] or prev_l <= p["PML"]) and (prev_c > prev_o) and (prev_c > llv5)
-            s_2b = (prev_h > hhv5 or prev_h >= p["PDH"] or prev_h >= p["PMH"]) and (prev_c < prev_o) and (prev_c < hhv5)
+            b_2b = (prev_l < llv5 or prev_l <= p["PDL"] or prev_l <= p["PML"] or prev_l <= p["RBS_BOT"] or prev_l <= p["RBS2_BOT"]) and (prev_c > prev_o) and (prev_c > llv5)
+            s_2b = (prev_h > hhv5 or prev_h >= p["PDH"] or prev_h >= p["PMH"] or prev_h >= p["SBR_TOP"] or prev_h >= p["SBR2_TOP"]) and (prev_c < prev_o) and (prev_c < hhv5)
 
             stop_buffer = max(0.5 * atr_v, 1.2)
 
@@ -298,7 +309,7 @@ has_8am_report = yesterday_myt_str in df_j["Date_MYT"].astype(str).values if not
 s1, s2, s3, s4 = st.columns(4)
 s1.success("✅ 10:00 PM 战区引擎已就绪" if has_10pm_p else "⏳ 10:00 PM 战区引擎等待中")
 s2.success(f"✅ 战报已交付 ({yesterday_myt_str})" if has_8am_report else f"⏳ 战报待更新 ({yesterday_myt_str})")
-s3.info("🎯 纪律窗口：22:00 - 24:00 (MYT) | 2B + Call + Put")
+s3.info("🎯 纪律窗口：22:00 - 24:00 (MYT) | 2B + Call + Put (全战区)")
 
 with s4:
     if st.button("🧪 执行系统全链路测试"):
@@ -311,7 +322,7 @@ st.markdown("---")
 tab1, tab2 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历账本"])
 
 with tab1:
-    st.subheader("🎯 QQQ 5M 战区座舱 (含 2B 假突破)")
+    st.subheader("🎯 QQQ 5M 战区座舱 (含 SBR/SBR2/RBS/RBS2 & 2B)")
     c_t1, c_t2 = st.columns(2)
     c_t1.info("🕒 大马时间 (MYT): " + now_myt.strftime("%Y-%m-%d %H:%M:%S"))
     c_t2.info("🇺🇸 美东时间 (ET): " + now_ny.strftime("%Y-%m-%d %H:%M:%S"))
@@ -416,8 +427,8 @@ with tab2:
     with cdl:
         csv_bytes = df_m.to_csv(index=False).encode("utf-8-sig") if not df_m.empty else "".encode("utf-8-sig")
         st.download_button(
-            label=f"📥 导出 {sel_y}年{sel_m}月 2B账本 (.csv)",
-            data=csv_bytes, file_name=f"Futu_2B_Journal_{sel_y}_{str(sel_m).zfill(2)}.csv", mime="text/csv", disabled=df_m.empty
+            label=f"📥 导出 {sel_y}年{sel_m}月 完整账本 (.csv)",
+            data=csv_bytes, file_name=f"Futu_Full_Journal_{sel_y}_{str(sel_m).zfill(2)}.csv", mime="text/csv", disabled=df_m.empty
         )
 
     k1, k2, k3, k4 = st.columns(4)
@@ -449,7 +460,7 @@ with tab2:
                         b_val = d_recs.iloc[0].get("TREND_BIAS", 0)
                         b_str = "多" if b_val == 1 else ("空" if b_val == -1 else "黄灯")
                         if cnt == 0:
-                            st.markdown(f"<div style='background-color:#f7fafc; border-radius:8px; padding:8px; height:120px; border:1px solid #e2e8f0; text-align:center;'><div style='font-size:13px; color:#718096; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:#a0aec0;'>({b_str})</span></div><div style='font-size:12px; color:#718096; margin-top:15px;'>⚪ 未触及2B战区</div><div style='font-size:10px; color:#a0aec0;'>空仓休战</div></div>", unsafe_allow_html=True)
+                            st.markdown(f"<div style='background-color:#f7fafc; border-radius:8px; padding:8px; height:120px; border:1px solid #e2e8f0; text-align:center;'><div style='font-size:13px; color:#718096; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:#a0aec0;'>({b_str})</span></div><div style='font-size:12px; color:#718096; margin-top:15px;'>⚪ 未触及战区</div><div style='font-size:10px; color:#a0aec0;'>空仓休战</div></div>", unsafe_allow_html=True)
                         else:
                             bg = "#e6fffa" if pts >= 0 else "#fff5f5"
                             bd = "#38b2ac" if pts >= 0 else "#e53e3e"
@@ -459,6 +470,6 @@ with tab2:
                     else:
                         st.markdown(f"<div style='background-color:#ffffff; border-radius:8px; padding:8px; height:120px; border:1px solid #edf2f7; text-align:center;'><div style='font-size:13px; color:#cbd5e0; text-align:left;'><b>{day}</b></div><div style='font-size:11px; color:#cbd5e0; margin-top:25px;'>-</div></div>", unsafe_allow_html=True)
 
-    with st.expander("🔍 展开查看 2B 同频明细表 (Full Data Table)"):
+    with st.expander("🔍 展开查看完整明细表 (Full Data Table)"):
         if not df_m.empty: st.dataframe(df_m.drop(columns=["Date_MYT_dt", "Year", "Month"], errors="ignore"), use_container_width=True)
         else: st.info("当月暂无交易明细。")
