@@ -392,8 +392,10 @@ with tab1:
                 m_c2.metric("🧭 宏观定调", b_desc)
                 m_c3.metric("📊 趋势得分", f"{p['TOTAL_SCORE']} / 3")
 
-                # 使用安全字符串拼接替代 f-string，彻底避免花括号冲突
-                futu_13 = (
-                    "TREND_BIAS := " + str(p['TREND_BIAS']) + ";       { 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: " + str(p['TOTAL_SCORE']) + "] }\n\n"
-                    "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }\n"
-                    "SBR_TOP := " + f"{p['SBR_TOP']:.2f}" + "; { 2. PRIMARY 1H 阻力顶沿 [" + str(p['SBR_TIM
+                # 用结构化列表逐行组装，彻底杜绝单行过长截断与引号语法错误
+                lines = [
+                    f"TREND_BIAS := {p['TREND_BIAS']};       {{ 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: {p['TOTAL_SCORE']}] }}",
+                    "",
+                    "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }",
+                    f"SBR_TOP := {p['SBR_TOP']:.2f}; {{ 2. PRIMARY 1H 阻力顶沿 [{p['SBR_TIME']}] }}",
+        
