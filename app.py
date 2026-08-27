@@ -208,7 +208,6 @@ def simulate_night_trades(df_5m, p, start_cutoff_ny, close_ny):
         vol_h = day_5m['VOL_HEAVY'].iloc[i]
         lwma = day_5m['LWMA20'].iloc[i]
 
-        # 检查持仓出场
         if in_pos:
             bars_held = i - entry_idx
             exit_flag, reason, exit_p = False, "", 0.0
@@ -249,7 +248,6 @@ def simulate_night_trades(df_5m, p, start_cutoff_ny, close_ny):
                 in_pos = False
                 continue
 
-        # 扫描开仓信号
         if not in_pos and i >= 2:
             prev_c, prev_o = day_5m['Close'].iloc[i-1], day_5m['Open'].iloc[i-1]
             prev_h, prev_l = day_5m['High'].iloc[i-1], day_5m['Low'].iloc[i-1]
@@ -394,9 +392,8 @@ with tab1:
                 m_c2.metric("🧭 宏观定调", b_desc)
                 m_c3.metric("📊 趋势得分", f"{p['TOTAL_SCORE']} / 3")
 
-                futu_13 = f"""TREND_BIAS := {p['TREND_BIAS']};       {{ 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: {p['TOTAL_SCORE']}] }}
-
-{{ --- 第一梯队主战区 (PRIMARY ZONES) --- }}
-SBR_TOP := {p['SBR_TOP']:.2f}; {{ 2. PRIMARY 1H 阻力顶沿 [{p['SBR_TIME']}] }}
-SBR_BOT := {p['SBR_BOT']:.2f}; {{ 3. PRIMARY 1H 阻力底沿 [{p['SBR_TIME']}] }}
-RBS_TOP := {p['RBS_TOP']:.2f}; {{ 4
+                # 使用安全字符串拼接替代 f-string，彻底避免花括号冲突
+                futu_13 = (
+                    "TREND_BIAS := " + str(p['TREND_BIAS']) + ";       { 1. 宏观偏向: 1=多, -1=空, 0=中立 [得分: " + str(p['TOTAL_SCORE']) + "] }\n\n"
+                    "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }\n"
+                    "SBR_TOP := " + f"{p['SBR_TOP']:.2f}" + "; { 2. PRIMARY 1H 阻力顶沿 [" + str(p['SBR_TIM
