@@ -536,9 +536,9 @@ with tab2:
         
         if df_5m_all is not None and not df_5m_all.empty:
             sel_d = pd.to_datetime(selected_date_str).date()
-            dt_start_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(21, 30, 0)))
-            dt_end_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(24, 0, 0))) + timedelta(minutes=15)
-            
+     # 将原先的 datetime.time(24, 0, 0) 改为当天 23:59:59 或加 1 天的 00:00:00
+dt_start_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(21, 30, 0)))
+dt_end_myt = tz_myt.localize(datetime.datetime.combine(sel_d + timedelta(days=1), datetime.time(0, 15, 0)))
             start_ny_view = dt_start_myt.astimezone(tz_ny)
             end_ny_view = dt_end_myt.astimezone(tz_ny)
             
