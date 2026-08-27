@@ -268,7 +268,8 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                     "Exit_MYT": exit_time_ny.astimezone(tz_myt).strftime("%H:%M"), "Exit_ET": exit_time_ny.strftime("%H:%M"),
                     "Entry_Price": round(entry_p, 2), "Exit_Price": round(exit_p, 2),
                     "SL": round(sl_p, 2), "TP": round(tp_p, 2), "PnL_Points": round(pnl, 2),
-                    "Reason": reason, "Result": "盈利" if pnl > 0 else ("保本" if pnl == 0 else "亏损")
+                    "Reason": reason, "Result": "盈利" if pnl > 0 else ("保本" if pnl == 0 else "亏损"),
+                    "Entry_DT_NY": entry_time_ny, "Exit_DT_NY": exit_time_ny
                 })
                 in_pos = False
                 daily_trade_count += 1
@@ -280,7 +281,6 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
             is_bstd = bool(buy_std_sig.iloc[i]) and not is_b2b
             is_sstd = bool(sell_std_sig.iloc[i]) and not is_s2b
 
-            # 统一使用 0.5 ATR 作为止损距离，1.0 ATR 作为目标止盈距离 (1:2)
             sl_dist = 0.5 * atr_v
             tp_dist = 1.0 * atr_v
 
@@ -342,7 +342,7 @@ def append_to_journal(date_str, params, trades):
         }
         r = dict(base_info); r.update(empty_t); rows.append(r)
 
-    df_new = pd.DataFrame(rows)[RECORD_COLUMNS]
+    df_new = pd.DataFrame(rows)[[c for c in RECORD_COLUMNS if c in rows[0]]]
     df_new.to_csv(CSV_FILE, index=False, encoding="utf-8-sig", mode="a" if os.path.exists(CSV_FILE) else "w", header=not os.path.exists(CSV_FILE))
     return True, f"成功记录 {len(rows)} 条明细"
 
@@ -368,7 +368,7 @@ with s4:
             else: st.success("自检通过：接口正常。")
 
 st.markdown("---")
-tab1, tab2, tab3 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历账本", "⚡ 当天 5M 执行座舱 (0.5 ATR)"])
+tab1, tab2, tab3 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历与复盘图", "⚡ 当天 5M 实时执行座舱 (0.5 ATR)"])
 
 with tab1:
     st.subheader("🎯 QQQ 5M 战区座舱 (含 SBR/SBR2/RBS/RBS2 & 2B)")
@@ -415,7 +415,7 @@ with tab1:
                 st.code("\n".join(out_lines), language="pascal")
 
 with tab2:
-    st.subheader("📅 QQQ 2B 同频月历账本 (22:00 - 24:00 MYT)")
+    st.subheader("📅 QQQ 2B 同频月历与执行细节")
     col_btn1, col_btn2, col_btn3 = st.columns([1.5, 2, 1.5])
     with col_btn1:
         if st.button("🛠️ 结算昨夜 22:00-24:00 账本"):
@@ -519,6 +519,84 @@ with tab2:
                     else:
                         st.markdown(f"<div style='background-color:#ffffff; border-radius:8px; padding:8px; height:120px; border:1px solid #edf2f7; text-align:center;'><div style='font-size:13px; color:#cbd5e0; text-align:left;'><b>{day}</b></div><div style='font-size:11px; color:#cbd5e0; margin-top:25px;'>-</div></div>", unsafe_allow_html=True)
 
+    # ---------------- 历史交易日 5M K线逐笔复盘视窗 ----------------
+    st.markdown("---")
+    st.subheader("🔍 历史交易日 5M K线与信号复盘图 (22:00 - 24:00 MYT)")
+
+    recorded_dates = sorted(list(set(df_journal["Date_MYT"].dropna().astype(str).tolist())), reverse=True) if not df_journal.empty else []
+    
+    if recorded_dates:
+        selected_date_str = st.selectbox("选择复盘交易日 (MYT)", options=recorded_dates)
+        
+        # 提取当天的记录
+        day_record = df_journal[df_journal["Date_MYT"] == selected_date_str].iloc[0]
+        
+        # 获取 5M 数据
+        _, df_5m_all, _ = fetch_raw_data_with_retry(period_5m="1mo")
+        
+        if df_5m_all is not None and not df_5m_all.empty:
+            sel_d = pd.to_datetime(selected_date_str).date()
+            dt_start_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(21, 30, 0)))
+            dt_end_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(24, 0, 0))) + timedelta(minutes=15)
+            
+            start_ny_view = dt_start_myt.astimezone(tz_ny)
+            end_ny_view = dt_end_myt.astimezone(tz_ny)
+            
+            sub_chart = df_5m_all[(df_5m_all.index >= start_ny_view) & (df_5m_all.index <= end_ny_view)].copy()
+            
+            if not sub_chart.empty:
+                # 转换索引时间为 MYT 方便对照
+                sub_chart["MYT_Time"] = sub_chart.index.tz_convert(tz_myt)
+                
+                fig_replay = go.Figure()
+                fig_replay.add_trace(go.Candlestick(
+                    x=sub_chart["MYT_Time"],
+                    open=sub_chart['Open'], high=sub_chart['High'],
+                    low=sub_chart['Low'], close=sub_chart['Close'],
+                    name="5M K线 (MYT)"
+                ))
+                
+                # 标记战区阻力支撑线
+                rbs_top_val = float(day_record.get("RBS_TOP", 0))
+                sbr_bot_val = float(day_record.get("SBR_BOT", 0))
+                if rbs_top_val > 0:
+                    fig_replay.add_hline(y=rbs_top_val, line_dash="dash", line_color="cyan", annotation_text="RBS 支撑顶")
+                if sbr_bot_val > 0:
+                    fig_replay.add_hline(y=sbr_bot_val, line_dash="dash", line_color="magenta", annotation_text="SBR 阻力底")
+
+                # 标记交易信号及入场/平仓线
+                sig_type = str(day_record.get("Signal", "NO_TRADE"))
+                if sig_type != "NO_TRADE" and not pd.isna(day_record.get("Entry_Price")):
+                    ep = float(day_record["Entry_Price"])
+                    xp = float(day_record["Exit_Price"])
+                    sl = float(day_record["SL"])
+                    tp = float(day_record["TP"])
+                    
+                    fig_replay.add_hline(y=ep, line_color="gold", line_width=1.5, annotation_text=f"入场价: {ep}")
+                    fig_replay.add_hline(y=sl, line_dash="dot", line_color="red", annotation_text=f"止损 (0.5 ATR): {sl}")
+                    fig_replay.add_hline(y=tp, line_dash="dot", line_color="green", annotation_text=f"止盈 (1:2): {tp}")
+
+                fig_replay.update_layout(
+                    title=f"{selected_date_str} 交易执行结构 | 信号: {sig_type} | 结果: {day_record.get('Result', '-')}",
+                    xaxis_rangeslider_visible=False,
+                    height=500,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    template="plotly_dark"
+                )
+                st.plotly_chart(fig_replay, use_container_width=True)
+                
+                # 当天关键数据卡片
+                rc1, rc2, rc3, rc4, rc5 = st.columns(5)
+                rc1.metric("信号类型", sig_type)
+                rc2.metric("入场时间 (MYT)", str(day_record.get("Entry_MYT", "-")))
+                rc3.metric("离场时间 (MYT)", str(day_record.get("Exit_MYT", "-")))
+                rc4.metric("离场原因", str(day_record.get("Reason", "-")))
+                rc5.metric("盈亏点数", f"{float(day_record.get('PnL_Points', 0)):+.2f} pt")
+            else:
+                st.warning("所选日期的 5M K线数据在当前缓冲池中未找到。")
+    else:
+        st.info("暂无历史记录，点击上方【一键回溯补录】或【结算】生成数据后即可在此复盘。")
+
     with st.expander("🔍 展开查看完整明细表 (Full Data Table)"):
         if not df_m.empty: st.dataframe(df_m.drop(columns=["Date_MYT_dt", "Year", "Month"], errors="ignore"), use_container_width=True)
         else: st.info("当月暂无交易明细。")
@@ -550,7 +628,6 @@ with tab3:
         c_price = float(cur_bar["Close"])
         c_atr = float(cur_bar["ATR"]) if not np.isnan(cur_bar["ATR"]) else 0.8
         
-        # 0.5 ATR 止损与 1:2 止盈计算
         sl_dist = 0.5 * c_atr
         tp_dist = 1.0 * c_atr
 
