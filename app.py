@@ -30,30 +30,19 @@ now_myt = datetime.datetime.now(tz_myt)
 now_ny = datetime.datetime.now(tz_ny)
 
 # =====================================================================
-# 2. 宏观面总导演 + 5M 数据抓取引擎
+# 2. 宏观面总导演 + 数据抓取引擎
 # =====================================================================
 def fetch_macro_and_market_data():
-    """
-    结合多书经典（跨市场美债 TNX、美元 DXY、恐慌 VIX、广度 RSP），
-    计算宏观多空得分，直接掌管 TREND_BIAS 定调。
-    """
-    err_log = []
-    # 默认中立
     macro_bias = 0
     macro_score = 50
     tnx_v, dxy_v, vix_v = 4.2, 102.0, 16.0
 
     try:
-        # 拉取宏观与市场标的
         tickers_macro = ["^TNX", "DX-Y.NYB", "^VIX", "QQQ", "RSP"]
-        df_macro = yf.download(tickers_macro, period="5d", interval="1d", progress=False, prepost=False)
+        df_macro = yf.download(tickers_macro, period="1mo", interval="1d", progress=False, prepost=False)
         if df_macro is not None and not df_macro.empty:
-            if isinstance(df_macro.columns, pd.MultiIndex):
-                close_df = df_macro["Close"]
-            else:
-                close_df = df_macro
+            close_df = df_macro["Close"] if isinstance(df_macro.columns, pd.MultiIndex) else df_macro
 
-            # 提取最新宏观数值
             if "^TNX" in close_df.columns:
                 tnx_v = float(close_df["^TNX"].dropna().iloc[-1])
             if "DX-Y.NYB" in close_df.columns:
@@ -61,55 +50,39 @@ def fetch_macro_and_market_data():
             if "^VIX" in close_df.columns:
                 vix_v = float(close_df["^VIX"].dropna().iloc[-1])
 
-            # 宏观多因子加减分逻辑
             score = 50
-            # 1. 10年美债收益率 (>4.5% 强压制，<4.0% 强利好)
-            if tnx_v > 4.5:
-                score -= 15
-            elif tnx_v < 4.0:
-                score += 15
+            if tnx_v > 4.5: score -= 15
+            elif tnx_v < 4.0: score += 15
 
-            # 2. 恐慌指数 VIX (<18 稳步进攻，>25 恐慌避险)
-            if vix_v < 18:
-                score += 15
-            elif vix_v > 25:
-                score -= 25
+            if vix_v < 18: score += 15
+            elif vix_v > 25: score -= 25
 
-            # 3. 美元指数 DXY (>103 海外营收缩水)
-            if dxy_v > 103:
-                score -= 10
-            elif dxy_v < 100:
-                score += 10
+            if dxy_v > 103: score -= 10
+            elif dxy_v < 100: score += 10
 
-            # 4. 市场广度动量 (QQQ vs RSP 5日涨跌幅背离)
-            if "QQQ" in close_df.columns and "RSP" in close_df.columns:
+            if "QQQ" in close_df.columns and "RSP" in close_df.columns and len(close_df["QQQ"].dropna()) >= 5:
                 q_chg = close_df["QQQ"].dropna().iloc[-1] / close_df["QQQ"].dropna().iloc[-5] - 1
                 r_chg = close_df["RSP"].dropna().iloc[-1] / close_df["RSP"].dropna().iloc[-5] - 1
-                if (r_chg - q_chg) > 0.01:
-                    score += 10  # 广度健康，全面上涨
-                elif (q_chg - r_chg) > 0.02:
-                    score -= 10  # 仅少数权重股虚拉，警惕背离见顶
+                if (r_chg - q_chg) > 0.01: score += 10
+                elif (q_chg - r_chg) > 0.02: score -= 10
 
             macro_score = max(5, min(95, score))
-            if macro_score >= 60:
-                macro_bias = 1   # 宏观偏多
-            elif macro_score <= 40:
-                macro_bias = -1  # 宏观偏空
-            else:
-                macro_bias = 0   # 宏观中立（震荡档：允许2B假突破，收紧标准形态）
+            if macro_score >= 60: macro_bias = 1
+            elif macro_score <= 40: macro_bias = -1
+            else: macro_bias = 0
 
-    except Exception as e:
-        err_log.append("宏观模型抓取异常: " + str(e))
+    except Exception:
+        pass
 
     return macro_bias, macro_score, tnx_v, dxy_v, vix_v
 
-def fetch_raw_data_with_retry(max_retries=3):
+def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
     df_1h, source_1h = None, "None"
     df_5m, source_5m = None, "None"
     err_log = []
-    start_str = (now_myt - timedelta(days=45)).strftime("%Y-%m-%d")
+    start_str = (now_myt - timedelta(days=60)).strftime("%Y-%m-%d")
 
-    # 1H 数据拉取 (Tiingo 优先)
+    # 1H 数据拉取
     for attempt in range(max_retries):
         url = f"https://api.tiingo.com/iex/{TICKER}/prices?startDate={start_str}&resampleFreq=1hour&token={TIINGO_TOKEN}&columns=open,high,low,close,volume"
         try:
@@ -125,13 +98,12 @@ def fetch_raw_data_with_retry(max_retries=3):
                     df_1h.index = df_1h.index.tz_localize("UTC").tz_convert(tz_ny) if df_1h.index.tz is None else df_1h.index.tz_convert(tz_ny)
                     source_1h = "Tiingo IEX API"
                     break
-        except Exception as e:
-            err_log.append("Tiingo 1H 失败: " + str(e))
+        except Exception:
             time.sleep(1)
 
     if df_1h is None:
         try:
-            df_yf = yf.download(TICKER, period="1mo", interval="1h", prepost=True, progress=False)
+            df_yf = yf.download(TICKER, period="2mo", interval="1h", prepost=True, progress=False)
             if df_yf is not None and not df_yf.empty:
                 if isinstance(df_yf.columns, pd.MultiIndex):
                     df_yf.columns = df_yf.columns.get_level_values(0)
@@ -141,9 +113,10 @@ def fetch_raw_data_with_retry(max_retries=3):
         except Exception as e:
             err_log.append("YahooFinance 1H 失败: " + str(e))
 
+    # 5M 数据拉取 (支持 1mo/2mo 批量回测)
     for attempt in range(max_retries):
         try:
-            df_5m_raw = yf.download(TICKER, period="5d", interval="5m", prepost=True, progress=False)
+            df_5m_raw = yf.download(TICKER, period=period_5m, interval="5m", prepost=True, progress=False)
             if df_5m_raw is not None and not df_5m_raw.empty:
                 if isinstance(df_5m_raw.columns, pd.MultiIndex):
                     df_5m_raw.columns = df_5m_raw.columns.get_level_values(0)
@@ -158,7 +131,7 @@ def fetch_raw_data_with_retry(max_retries=3):
     return df_1h, source_1h, df_5m, source_5m, err_log
 
 # =====================================================================
-# 3. 核心运算：宏观多空总导演 + 13 行战区参数生成
+# 3. 核心运算：宏观多空总导演 + 13 行战区参数生成与回放
 # =====================================================================
 def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     if df_1h is None:
@@ -221,7 +194,6 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     rbs_top, rbs_bot, rbs_time = valid_lows[0] if len(valid_lows) >= 1 else (live_price - 0.6 * atr, live_price - 1.2 * atr, "Range Low")
     rbs2_top, rbs2_bot, rbs2_time = valid_lows[1] if len(valid_lows) >= 2 else (rbs_bot - 0.5 * atr, rbs_bot - 1.2 * atr, "Tier-2 Low")
 
-    # 获取宏观总导演定调
     macro_bias, macro_score, tnx_v, dxy_v, vix_v = fetch_macro_and_market_data()
 
     return {
@@ -245,7 +217,7 @@ def simulate_night_trades(df_5m, p, start_cutoff_ny, close_ny):
         return trades
 
     day_5m = df_5m[(df_5m.index >= start_cutoff_ny) & (df_5m.index <= close_ny)].copy()
-    if len(day_5m) < 20:
+    if len(day_5m) < 15:
         return trades
 
     weights = np.arange(1, 21)
@@ -326,7 +298,6 @@ def simulate_night_trades(df_5m, p, start_cutoff_ny, close_ny):
             b_engulf = buy_zone and (prev_c > prev_o) and (day_5m["Close"].iloc[i-2] < day_5m["Open"].iloc[i-2]) and (prev_c >= day_5m["Open"].iloc[i-2])
             s_engulf = sell_zone and (prev_c < prev_o) and (day_5m["Close"].iloc[i-2] > day_5m["Open"].iloc[i-2]) and (prev_c <= day_5m["Open"].iloc[i-2])
 
-            # 动态门槛：若宏观中立(0)，则过滤普通标准形态，仅允许胜率极高的 2B 假突破
             if p["TREND_BIAS"] == 0:
                 buy_ok = (h > prev_h) and (c > o) and (c > lwma) and vol_ok and b_2b
                 sell_ok = (l < prev_l) and (c < o) and (c < lwma) and vol_ok and s_2b
@@ -430,7 +401,7 @@ s3.info("🟢 系统全运转正常")
 with s4:
     if st.button("🧪 执行系统全链路测试"):
         with st.spinner("正在回放测试..."):
-            d1, s1h, d5, s5m, errs = fetch_raw_data_with_retry()
+            d1, s1h, d5, s5m, errs = fetch_raw_data_with_retry(period_5m="5d")
             if errs:
                 st.error("异常: " + "; ".join(errs))
             else:
@@ -456,19 +427,16 @@ with tab1:
             st.cache_data.clear()
             st.rerun()
 
-        d1h, src1h, d5m, src5m, _ = fetch_raw_data_with_retry()
+        d1h, src1h, d5m, src5m, _ = fetch_raw_data_with_retry(period_5m="5d")
         if d1h is not None:
             p = compute_futu_13_params(d1h, d5m, now_ny)
             if p:
                 m_c1, m_c2, m_c3, m_c4 = st.columns(4)
                 m_c1.metric("🎯 QQQ 现价", "$" + str(round(p["live_price"], 2)))
                 
-                if p["TREND_BIAS"] == 1:
-                    b_desc = "🟢 宏观偏多 (CALL)"
-                elif p["TREND_BIAS"] == -1:
-                    b_desc = "🔴 宏观偏空 (PUT)"
-                else:
-                    b_desc = "⚪ 宏观中立 (防守2B)"
+                if p["TREND_BIAS"] == 1: b_desc = "🟢 宏观偏多 (CALL)"
+                elif p["TREND_BIAS"] == -1: b_desc = "🔴 宏观偏空 (PUT)"
+                else: b_desc = "⚪ 宏观中立 (防守2B)"
                 
                 m_c2.metric("🧭 宏观总定调", b_desc)
                 m_c3.metric("📊 宏观多空分", str(p["TOTAL_SCORE"]) + " / 100分")
@@ -500,16 +468,16 @@ with tab1:
                 st.code(futu_13, language="pascal")
 
 # =====================================================================
-# TAB 2: 实战月历账本
+# TAB 2: 实战月历账本 (带一键全月补录)
 # =====================================================================
 with tab2:
     st.subheader("📅 QQQ 5M 实战月历记账本")
 
-    col_btn1, _ = st.columns([2, 2])
+    col_btn1, col_btn2 = st.columns([1.5, 2])
     with col_btn1:
         if st.button("🛠️ 立即自动结算并补录昨夜账本"):
             with st.spinner("正在结算昨夜复盘..."):
-                d1h, _, d5m, _, _ = fetch_raw_data_with_retry()
+                d1h, _, d5m, _, _ = fetch_raw_data_with_retry(period_5m="5d")
                 target_d = now_myt.date() - timedelta(days=1)
                 dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(target_d, datetime.time(22, 0, 0)))
                 cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
@@ -524,6 +492,31 @@ with tab2:
                         st.rerun()
                     else:
                         st.warning(msg)
+
+    with col_btn2:
+        if st.button("⚡ 一键回溯补录当月所有历史交易日 (Backfill)"):
+            with st.spinner("正在抓取当月全部历史 K 线并批量执行复盘运算，请稍候 5-10 秒..."):
+                d1h, _, d5m, _, _ = fetch_raw_data_with_retry(period_5m="1mo")
+                if d1h is not None and d5m is not None:
+                    dates_in_5m = sorted(list(set(d5m.index.date)))
+                    added_cnt = 0
+                    for d in dates_in_5m:
+                        if d >= now_ny.date():
+                            continue  # 今天未收盘，跳过
+                        dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(d, datetime.time(22, 0, 0)))
+                        cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
+                        close_ny = cutoff_ny.replace(hour=16, minute=0, second=0)
+
+                        p_day = compute_futu_13_params(d1h, d5m, cutoff_ny)
+                        if p_day:
+                            trades_day = simulate_night_trades(d5m, p_day, cutoff_ny, close_ny)
+                            ok, _ = append_to_journal(d.strftime("%Y-%m-%d"), p_day, trades_day)
+                            if ok: added_cnt += 1
+
+                    st.success(f"🎉 成功完成历史回溯，批量补录了 {added_cnt} 个交易日的实战数据！")
+                    st.rerun()
+                else:
+                    st.error("拉取历史数据失败，请重试。")
 
     df_journal = load_journal()
     if not df_journal.empty and "Date_MYT" in df_journal.columns:
