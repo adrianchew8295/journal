@@ -14,7 +14,7 @@ import yfinance as yf
 # 1. 基础配置与凭证锁定
 # =====================================================================
 st.set_page_config(
-    page_title="QQQ 黄金2小时极简战区座舱",
+    page_title="QQQ 富途指标同频座舱",
     page_icon="🎯",
     layout="wide"
 )
@@ -38,7 +38,6 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
     err_log = []
     start_str = (now_myt - timedelta(days=60)).strftime("%Y-%m-%d")
 
-    # 1H 数据拉取
     for attempt in range(max_retries):
         url = f"https://api.tiingo.com/iex/{TICKER}/prices?startDate={start_str}&resampleFreq=1hour&token={TIINGO_TOKEN}&columns=open,high,low,close,volume"
         try:
@@ -52,7 +51,6 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
                     df_t.rename(columns={"open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
                     df_1h = df_t[["Open", "High", "Low", "Close", "Volume"]].sort_index()
                     df_1h.index = df_1h.index.tz_localize("UTC").tz_convert(tz_ny) if df_1h.index.tz is None else df_1h.index.tz_convert(tz_ny)
-                    source_1h = "Tiingo IEX API"
                     break
         except Exception:
             time.sleep(1)
@@ -65,11 +63,9 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
                     df_yf.columns = df_yf.columns.get_level_values(0)
                 df_1h = df_yf[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
                 df_1h.index = df_1h.index.tz_localize("UTC").tz_convert(tz_ny) if df_1h.index.tz is None else df_1h.index.tz_convert(tz_ny)
-                source_1h = "YahooFinance (1H)"
         except Exception as e:
             err_log.append("YahooFinance 1H 失败: " + str(e))
 
-    # 5M 数据拉取
     for attempt in range(max_retries):
         try:
             df_5m_raw = yf.download(TICKER, period=period_5m, interval="5m", prepost=True, progress=False)
@@ -78,16 +74,15 @@ def fetch_raw_data_with_retry(period_5m="1mo", max_retries=3):
                     df_5m_raw.columns = df_5m_raw.columns.get_level_values(0)
                 df_5m = df_5m_raw[["Open", "High", "Low", "Close", "Volume"]].dropna().copy()
                 df_5m.index = df_5m.index.tz_localize("UTC").tz_convert(tz_ny) if df_5m.index.tz is None else df_5m.index.tz_convert(tz_ny)
-                source_5m = "YahooFinance (5M)"
                 break
         except Exception as e:
             err_log.append("YahooFinance 5M 失败: " + str(e))
             time.sleep(1)
 
-    return df_1h, source_1h, df_5m, source_5m, err_log
+    return df_1h, df_5m, err_log
 
 # =====================================================================
-# 3. 核心运算：QQQ 三灯信号 + 黄金 2 小时实战回测
+# 3. 核心运算：100% 对齐富途 13 行与三灯定调
 # =====================================================================
 def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     if df_1h is None:
@@ -161,7 +156,7 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
         bias_desc = "🔴 红灯 (做空为主)"
     else:
         trend_bias = 0
-        bias_desc = "🟡 黄灯 (震荡防守·仅做2B)"
+        bias_desc = "🟡 黄灯 (震荡防守·空仓)"
 
     return {
         "live_price": live_price,
@@ -179,72 +174,56 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
         "PML": pml_val, "PML_TIME": pml_time
     }
 
-def simulate_night_trades(df_5m, p, start_cutoff_ny, window_end_ny):
+def simulate_futu_pure_trades(df_5m, p, start_cutoff_ny, window_end_ny):
     """
-    严格锁定在宿主纪律窗口：大马时间 22:00 至 24:00（美东 10:00 至 12:00）。
-    单日最多开 1 笔，到 24:00 强制时间清仓，绝不熬夜。
+    100% 对齐富途牛牛：22:00-24:00 黄金时段，
+    依据 TREND_BIAS 与 13 行战区触碰直接开仓，止损放宽，2R 止盈，24:00 准时收工。
     """
     trades = []
     if p is None or df_5m is None:
         return trades
 
-    # 截取黄金 2 小时 K 线
-    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(minutes=100)) & (df_5m.index <= window_end_ny)].copy()
-    if len(day_5m) < 15:
+    day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(minutes=60)) & (df_5m.index <= window_end_ny)].copy()
+    if len(day_5m) < 10:
         return trades
 
-    weights = np.arange(1, 21)
-    day_5m["LWMA20"] = day_5m["Close"].rolling(20).apply(lambda prices: np.dot(prices, weights) / weights.sum(), raw=True)
     tr_5m = np.maximum(day_5m["High"] - day_5m["Low"],
                        np.maximum((day_5m["High"] - day_5m["Close"].shift(1)).abs(),
                                   (day_5m["Low"] - day_5m["Close"].shift(1)).abs()))
     day_5m["ATR14"] = tr_5m.rolling(14).mean()
-    day_5m["VOL_MA"] = day_5m["Volume"].rolling(20).mean()
-    day_5m["VOL_HEAVY"] = day_5m["Volume"] >= (1.25 * day_5m["VOL_MA"])
 
     in_pos, pos_type = False, 0
-    entry_p, sl_p, tp_p, be_trigger_p = 0.0, 0.0, 0.0, 0.0
-    entry_idx, entry_time_ny = 0, None
-    futu_signal_tag = ""
+    entry_p, sl_p, tp_p = 0.0, 0.0, 0.0
+    entry_time_ny = None
     daily_trade_count = 0
 
-    # 寻找入场点起始位置（22:00 MYT / 10:00 ET）
     start_idx = 0
     for idx_i, t_idx in enumerate(day_5m.index):
         if t_idx >= start_cutoff_ny:
-            start_idx = max(20, idx_i)
+            start_idx = idx_i
             break
 
     for i in range(start_idx, len(day_5m)):
         cur_t_ny = day_5m.index[i]
-        c, o, h, l = day_5m["Close"].iloc[i], day_5m["Open"].iloc[i], day_5m["High"].iloc[i], day_5m["Low"].iloc[i]
+        c, h, l = day_5m["Close"].iloc[i], day_5m["High"].iloc[i], day_5m["Low"].iloc[i]
         atr_v = day_5m["ATR14"].iloc[i] if not np.isnan(day_5m["ATR14"].iloc[i]) else 0.8
-        vol_h = bool(day_5m["VOL_HEAVY"].iloc[i])
-        lwma = day_5m["LWMA20"].iloc[i]
-
-        # 检查是否到达 24:00 MYT 纪律清仓点
         is_window_close = (cur_t_ny >= window_end_ny - timedelta(minutes=5))
 
         if in_pos:
             exit_flag, reason, exit_p = False, "", 0.0
-
             if pos_type == 1:
-                if h >= entry_p + (entry_p - sl_p): be_trigger_p = entry_p
                 if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
                 elif l <= sl_p: exit_flag, reason, exit_p = True, "SL (止损)", sl_p
                 elif h >= tp_p: exit_flag, reason, exit_p = True, "TP (2R止盈)", tp_p
-                elif be_trigger_p > 0 and l <= be_trigger_p: exit_flag, reason, exit_p = True, "BE (1R保本损)", be_trigger_p
             elif pos_type == -1:
-                if l <= entry_p - (sl_p - entry_p): be_trigger_p = entry_p
                 if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
                 elif h >= sl_p: exit_flag, reason, exit_p = True, "SL (止损)", sl_p
                 elif l <= tp_p: exit_flag, reason, exit_p = True, "TP (2R止盈)", tp_p
-                elif be_trigger_p > 0 and h >= be_trigger_p: exit_flag, reason, exit_p = True, "BE (1R保本损)", be_trigger_p
 
             if exit_flag:
                 pnl = (exit_p - entry_p) if pos_type == 1 else (entry_p - exit_p)
                 trades.append({
-                    "Signal": futu_signal_tag,
+                    "Signal": "▲ Futu Bull" if pos_type == 1 else "▼ Futu Bear",
                     "Entry_MYT": entry_time_ny.astimezone(tz_myt).strftime("%H:%M"),
                     "Entry_ET": entry_time_ny.strftime("%H:%M"),
                     "Exit_MYT": cur_t_ny.astimezone(tz_myt).strftime("%H:%M"),
@@ -258,51 +237,29 @@ def simulate_night_trades(df_5m, p, start_cutoff_ny, window_end_ny):
                 })
                 in_pos = False
                 daily_trade_count += 1
-                break  # 单日做满 1 笔立即锁定收工
+                break
 
-        # 未持仓且未开过单，并在 23:45 前寻找入场
         if not in_pos and daily_trade_count == 0 and cur_t_ny < (window_end_ny - timedelta(minutes=15)):
-            prev_c, prev_o = day_5m["Close"].iloc[i-1], day_5m["Open"].iloc[i-1]
-            prev_h, prev_l = day_5m["High"].iloc[i-1], day_5m["Low"].iloc[i-1]
-            vol_ok = vol_h or bool(day_5m["VOL_HEAVY"].iloc[i-1])
+            bias = p["TREND_BIAS"]
+            if bias == 0:
+                continue
 
-            buy_zone = (prev_l <= p["RBS_TOP"] and prev_c >= p["RBS_BOT"]) or (prev_l <= p["PDL"] and prev_c > p["PDL"]) or (prev_l <= p["PML"] and prev_c > p["PML"])
-            sell_zone = (prev_h >= p["SBR_BOT"] and prev_c <= p["SBR_TOP"]) or (prev_h >= p["PDH"] and prev_c < p["PDH"]) or (prev_h >= p["PMH"] and prev_c < p["PMH"])
-
-            llv5 = day_5m["Low"].iloc[i-6:i-1].min()
-            hhv5 = day_5m["High"].iloc[i-6:i-1].max()
-
-            b_2b = (prev_l < llv5 or prev_l < p["PDL"] or prev_l < p["PML"]) and (prev_c > llv5) and (prev_c > prev_o)
-            s_2b = (prev_h > hhv5 or prev_h > p["PDH"] or prev_h > p["PMH"]) and (prev_c < hhv5) and (prev_c < prev_o)
-
-            b_engulf = buy_zone and (prev_c > prev_o) and (day_5m["Close"].iloc[i-2] < day_5m["Open"].iloc[i-2]) and (prev_c >= day_5m["Open"].iloc[i-2])
-            s_engulf = sell_zone and (prev_c < prev_o) and (day_5m["Close"].iloc[i-2] > day_5m["Open"].iloc[i-2]) and (prev_c <= day_5m["Open"].iloc[i-2])
-
-            if p["TREND_BIAS"] == 0:
-                buy_ok = (h > prev_h) and (c > o) and (c > lwma) and vol_ok and b_2b
-                sell_ok = (l < prev_l) and (c < o) and (c < lwma) and vol_ok and s_2b
-            else:
-                buy_ok = (p["TREND_BIAS"] == 1) and (h > prev_h) and (c > o) and (c > lwma) and vol_ok and (b_2b or b_engulf)
-                sell_ok = (p["TREND_BIAS"] == -1) and (l < prev_l) and (c < o) and (c < lwma) and vol_ok and (s_2b or s_engulf)
-
+            touch_long = (l <= p["RBS_TOP"] and h >= p["RBS_BOT"]) or (l <= p["PDL"] and h >= p["PDL"] - 0.5) or (l <= p["PML"] and h >= p["PML"] - 0.5)
+            touch_short = (h >= p["SBR_BOT"] and l <= p["SBR_TOP"]) or (h >= p["PDH"] and l <= p["PDH"] + 0.5) or (h >= p["PMH"] and l <= p["PMH"] + 0.5)
             stop_buffer = max(0.5 * atr_v, 1.2)
 
-            if buy_ok:
+            if bias == 1 and touch_long:
                 in_pos, pos_type = True, 1
                 entry_p = c
-                sl_p = min(prev_l, l) - stop_buffer
+                sl_p = p["RBS_BOT"] - stop_buffer if p["RBS_BOT"] > 0 else c - 2.0
                 tp_p = c + 2.0 * (c - sl_p)
-                entry_idx, entry_time_ny = i, cur_t_ny
-                futu_signal_tag = "▲▲ 2B" if b_2b else "▲ CALL"
-                be_trigger_p = 0.0
-            elif sell_ok:
+                entry_time_ny = cur_t_ny
+            elif bias == -1 and touch_short:
                 in_pos, pos_type = True, -1
                 entry_p = c
-                sl_p = max(prev_h, h) + stop_buffer
+                sl_p = p["SBR_TOP"] + stop_buffer if p["SBR_TOP"] > 0 else c + 2.0
                 tp_p = c - 2.0 * (sl_p - c)
-                entry_idx, entry_time_ny = i, cur_t_ny
-                futu_signal_tag = "▼▼ 2B" if s_2b else "▼ PUT"
-                be_trigger_p = 0.0
+                entry_time_ny = cur_t_ny
 
     return trades
 
@@ -357,7 +314,7 @@ def append_to_journal(date_str, params, trades):
         empty_t = {
             "Signal": "NO_TRADE", "Entry_MYT": "-", "Entry_ET": "-",
             "Exit_MYT": "-", "Exit_ET": "-", "Entry_Price": 0.0, "Exit_Price": 0.0,
-            "SL": 0.0, "TP": 0.0, "PnL_Points": 0.0, "Reason": "窗口期无高胜率信号", "Result": "无"
+            "SL": 0.0, "TP": 0.0, "PnL_Points": 0.0, "Reason": "黄灯或未触及13行战区", "Result": "无"
         }
         r = dict(base_info)
         r.update(empty_t)
@@ -377,28 +334,25 @@ has_10pm_p = (now_myt.hour >= 22 or now_myt.hour < 5)
 has_8am_report = yesterday_myt_str in df_j["Date_MYT"].astype(str).values if not df_j.empty else False
 
 s1, s2, s3, s4 = st.columns(4)
-s1.success("✅ 10:00 PM 参数引擎已就绪" if has_10pm_p else "⏳ 10:00 PM 参数引擎等待中")
+s1.success("✅ 10:00 PM 战区引擎已就绪" if has_10pm_p else "⏳ 10:00 PM 战区引擎等待中")
 s2.success(f"✅ 战报已交付 ({yesterday_myt_str})" if has_8am_report else f"⏳ 战报待更新 ({yesterday_myt_str})")
 s3.info("🎯 纪律窗口：22:00 - 24:00 (MYT)")
 
 with s4:
     if st.button("🧪 执行系统全链路测试"):
         with st.spinner("正在自检..."):
-            d1, s1h, d5, s5m, errs = fetch_raw_data_with_retry(period_5m="5d")
+            d1, d5, errs = fetch_raw_data_with_retry(period_5m="5d")
             if errs:
                 st.error("异常: " + "; ".join(errs))
             else:
-                st.success("自检通过：QQQ 数据接口正常。")
+                st.success("自检通过：接口正常。")
 
 st.markdown("---")
 
-tab1, tab2 = st.tabs(["🎯 QQQ 战区座舱 (富途参数复制)", "📅 QQQ 黄金2小时实战月历"])
+tab1, tab2 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 富途同频月历账本"])
 
-# =====================================================================
-# TAB 1: 战区座舱与 13 行富途参数
-# =====================================================================
 with tab1:
-    st.subheader("🎯 QQQ 5M 交易座舱 (黄金 2 小时窗口)")
+    st.subheader("🎯 QQQ 5M 战区座舱 (富途同频)")
     c_t1, c_t2 = st.columns(2)
     c_t1.info("🕒 大马时间 (MYT): " + now_myt.strftime("%Y-%m-%d %H:%M:%S"))
     c_t2.info("🇺🇸 美东时间 (ET): " + now_ny.strftime("%Y-%m-%d %H:%M:%S"))
@@ -410,7 +364,7 @@ with tab1:
             st.cache_data.clear()
             st.rerun()
 
-        d1h, src1h, d5m, src5m, _ = fetch_raw_data_with_retry(period_5m="5d")
+        d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="5d")
         if d1h is not None:
             p = compute_futu_13_params(d1h, d5m, now_ny)
             if p:
@@ -421,7 +375,7 @@ with tab1:
                 m4.metric("📊 1H ATR 波动", f"${p['ATR_1H']:.2f}")
 
                 out_lines = [
-                    f"TREND_BIAS := {p['TREND_BIAS']};       {{ 1. QQQ三灯判定: 1=绿灯做多, -1=红灯做空, 0=黄灯震荡防守 }}",
+                    f"TREND_BIAS := {p['TREND_BIAS']};       {{ 1. QQQ三灯判定: 1=绿灯做多, -1=红灯做空, 0=黄灯防守 }}",
                     "",
                     "{ --- 第一梯队主战区 (PRIMARY ZONES) --- }",
                     f"SBR_TOP := {round(p['SBR_TOP'], 2)}; {{ 2. PRIMARY 1H 阻力顶沿 [{p['SBR_TIME']}] }}",
@@ -444,17 +398,14 @@ with tab1:
                 st.markdown("#### 📋 复制到富途指标顶部 13 行代码 (点右上角复制):")
                 st.code("\n".join(out_lines), language="pascal")
 
-# =====================================================================
-# TAB 2: 实战月历账本
-# =====================================================================
 with tab2:
-    st.subheader("📅 QQQ 黄金 2 小时 (22:00 - 24:00 MYT) 实战月历")
+    st.subheader("📅 QQQ 富途同频月历账本 (22:00 - 24:00 MYT)")
 
     col_btn1, col_btn2, col_btn3 = st.columns([1.5, 2, 1.5])
     with col_btn1:
         if st.button("🛠️ 结算昨夜 22:00-24:00 账本"):
-            with st.spinner("正在结算昨夜 2 小时复盘..."):
-                d1h, _, d5m, _, _ = fetch_raw_data_with_retry(period_5m="5d")
+            with st.spinner("正在结算..."):
+                d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="5d")
                 target_d = now_myt.date() - timedelta(days=1)
                 dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(target_d, datetime.time(22, 0, 0)))
                 cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
@@ -462,35 +413,31 @@ with tab2:
 
                 p = compute_futu_13_params(d1h, d5m, cutoff_ny)
                 if p:
-                    trades = simulate_night_trades(d5m, p, cutoff_ny, window_end_ny)
+                    trades = simulate_futu_pure_trades(d5m, p, cutoff_ny, window_end_ny)
                     ok, msg = append_to_journal(target_d.strftime("%Y-%m-%d"), p, trades)
-                    if ok:
-                        st.success(msg)
-                        st.rerun()
-                    else:
-                        st.warning(msg)
+                    if ok: st.success(msg); st.rerun()
+                    else: st.warning(msg)
 
     with col_btn2:
         if st.button("⚡ 一键回溯补录当月所有历史交易日 (Backfill)"):
-            with st.spinner("正在严格按 22:00-24:00 黄金时段回溯运算，请稍候 5-10 秒..."):
-                d1h, _, d5m, _, _ = fetch_raw_data_with_retry(period_5m="1mo")
+            with st.spinner("正在回溯运算..."):
+                d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="1mo")
                 if d1h is not None and d5m is not None:
                     dates_in_5m = sorted(list(set(d5m.index.date)))
                     added_cnt = 0
                     for d in dates_in_5m:
-                        if d >= now_ny.date():
-                            continue
+                        if d >= now_ny.date(): continue
                         dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(d, datetime.time(22, 0, 0)))
                         cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
                         window_end_ny = cutoff_ny + timedelta(hours=2)
 
                         p_day = compute_futu_13_params(d1h, d5m, cutoff_ny)
                         if p_day:
-                            trades_day = simulate_night_trades(d5m, p_day, cutoff_ny, window_end_ny)
+                            trades_day = simulate_futu_pure_trades(d5m, p_day, cutoff_ny, window_end_ny)
                             ok, _ = append_to_journal(d.strftime("%Y-%m-%d"), p_day, trades_day)
                             if ok: added_cnt += 1
 
-                    st.success(f"🎉 黄金 2 小时回溯完成，新增 {added_cnt} 个交易日记录！")
+                    st.success(f"🎉 回溯完成，新增 {added_cnt} 个交易日记录！")
                     st.rerun()
 
     with col_btn3:
@@ -522,18 +469,18 @@ with tab2:
     with cdl:
         csv_bytes = df_m.to_csv(index=False).encode("utf-8-sig") if not df_m.empty else "".encode("utf-8-sig")
         st.download_button(
-            label=f"📥 导出 {sel_y}年{sel_m}月 黄金时段账本 (.csv)",
+            label=f"📥 导出 {sel_y}年{sel_m}月 账本 (.csv)",
             data=csv_bytes,
-            file_name=f"QQQ_Golden_Journal_{sel_y}_{str(sel_m).zfill(2)}.csv",
+            file_name=f"Futu_Sync_Journal_{sel_y}_{str(sel_m).zfill(2)}.csv",
             mime="text/csv",
             disabled=df_m.empty
         )
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("🗓️ 选定月份", f"{sel_y} 年 {sel_m} 月")
-    k2.metric("💰 黄金窗口盈亏", f"{tot_pts:+.2f} pt")
-    k3.metric("🎯 黄金窗口胜率", f"{w_rate:.1f}%", f"{w_cnt}/{tot_cnt} 胜")
-    k4.metric("📊 开仓总笔数", f"{tot_cnt} 笔 (每晚限1笔)")
+    k2.metric("💰 窗口盈亏", f"{tot_pts:+.2f} pt")
+    k3.metric("🎯 窗口胜率", f"{w_rate:.1f}%", f"{w_cnt}/{tot_cnt} 胜")
+    k4.metric("📊 开仓总笔数", f"{tot_cnt} 笔")
 
     st.markdown("---")
 
@@ -569,13 +516,13 @@ with tab2:
                         cnt = len(r_t)
                         pts = r_t["PnL_Points"].sum() if not r_t.empty else 0.0
                         b_val = d_recs.iloc[0].get("TREND_BIAS", 0)
-                        b_str = "多" if b_val == 1 else ("空" if b_val == -1 else "中立")
+                        b_str = "多" if b_val == 1 else ("空" if b_val == -1 else "黄灯")
 
                         if cnt == 0:
                             st.markdown(
                                 f"<div style='background-color:#f7fafc; border-radius:8px; padding:8px; height:120px; border:1px solid #e2e8f0; text-align:center;'>"
                                 f"<div style='font-size:13px; color:#718096; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:#a0aec0;'>({b_str})</span></div>"
-                                f"<div style='font-size:12px; color:#718096; margin-top:15px;'>⚪ 无高胜率机会</div>"
+                                f"<div style='font-size:12px; color:#718096; margin-top:15px;'>⚪ 未触及战区</div>"
                                 f"<div style='font-size:10px; color:#a0aec0;'>空仓休战</div></div>",
                                 unsafe_allow_html=True
                             )
@@ -588,7 +535,7 @@ with tab2:
                                 f"<div style='background-color:{bg}; border-radius:8px; padding:8px; height:120px; border:2px solid {bd}; text-align:center;'>"
                                 f"<div style='font-size:13px; color:{tc}; text-align:left;'><b>{day}</b> <span style='font-size:10px; color:{bd};'>({b_str})</span></div>"
                                 f"<div style='font-size:15px; font-weight:bold; color:{bd}; margin-top:2px;'>{sgn}{pts:.2f} pt</div>"
-                                f"<div style='font-size:11px; color:{tc};'>{cnt} 笔交易 (22:00-24:00)</div></div>",
+                                f"<div style='font-size:11px; color:{tc};'>{cnt} 笔交易 (22-24点)</div></div>",
                                 unsafe_allow_html=True
                             )
                     else:
@@ -599,7 +546,7 @@ with tab2:
                             unsafe_allow_html=True
                         )
 
-    with st.expander("🔍 展开查看黄金时段流水明细 (Full Data Table)"):
+    with st.expander("🔍 展开查看富途同频明细表 (Full Data Table)"):
         if not df_m.empty:
             st.dataframe(df_m.drop(columns=["Date_MYT_dt", "Year", "Month"], errors="ignore"), use_container_width=True)
         else:
