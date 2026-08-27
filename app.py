@@ -111,7 +111,7 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
         live_price = float(sub_1h["Close"].iloc[-1])
 
     sub_1h["EMA20"] = sub_1h["Close"].ewm(span=20, adjust=False).mean()
-    sub_1h["EMA20_slope"] = sub_1h["EMA20"].diff()
+    sub_1h["SMA50"] = sub_1h["Close"].rolling(window=50).mean()
 
     tr = np.maximum(sub_1h["High"] - sub_1h["Low"], np.maximum((sub_1h["High"] - sub_1h["Close"].shift(1)).abs(), (sub_1h["Low"] - sub_1h["Close"].shift(1)).abs()))
     atr = float(tr.rolling(14).mean().iloc[-1]) if not np.isnan(tr.rolling(14).mean().iloc[-1]) else (live_price * 0.008)
@@ -134,19 +134,30 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     rbs_top, rbs_bot, rbs_time = valid_lows[0] if len(valid_lows) >= 1 else (live_price - 0.6 * atr, live_price - 1.2 * atr, "Range Low")
     rbs2_top, rbs2_bot, rbs2_time = valid_lows[1] if len(valid_lows) >= 2 else (rbs_bot - 0.5 * atr, rbs_bot - 1.2 * atr, "Tier-2 Low")
 
-    ema_now = sub_1h["EMA20"].iloc[-1]
-    slope_now = sub_1h["EMA20_slope"].iloc[-1]
+    # =====================================================================
+    # 严格三维共振定调算法 (100% 对齐原版脚本)
+    # =====================================================================
+    ema20_now = float(sub_1h["EMA20"].iloc[-1])
+    sma50_now = float(sub_1h["SMA50"].iloc[-1]) if not np.isnan(sub_1h["SMA50"].iloc[-1]) else ema20_now
+    score_ma = 1 if (live_price > ema20_now and ema20_now >= sma50_now) else (-1 if (live_price < ema20_now and ema20_now <= sma50_now) else 0)
 
-    if live_price > ema_now and slope_now > 0:
-        trend_bias, bias_desc = 1, "🟢 绿灯 (做多为主)"
-    elif live_price < ema_now and slope_now < 0:
-        trend_bias, bias_desc = -1, "🔴 红灯 (做空为主)"
-    else:
-        trend_bias, bias_desc = 0, "🟡 黄灯 (震荡防守)"
+    score_hhll = 0
+    if len(pivots_high) >= 2 and len(pivots_low) >= 2:
+        last_2_h, last_2_l = [p[0] for p in pivots_high[-2:]], [p[1] for p in pivots_low[-2:]]
+        if last_2_h[1] > last_2_h[0] and last_2_l[1] > last_2_l[0]: score_hhll = 1
+        elif last_2_h[1] < last_2_h[0] and last_2_l[1] < last_2_l[0]: score_hhll = -1
+
+    ema20_prev = float(sub_1h["EMA20"].iloc[-5])
+    ema_slope = (ema20_now - ema20_prev) / ema20_prev * 100
+    score_slope = 1 if ema_slope > 0.15 else (-1 if ema_slope < -0.15 else 0)
+
+    total_score = score_ma + score_hhll + score_slope
+    trend_bias = 1 if total_score >= 2 else (-1 if total_score <= -2 else 0)
+    bias_desc = "🟢 绿灯 (做多为主)" if trend_bias == 1 else ("🔴 红灯 (做空为主)" if trend_bias == -1 else "🟡 黄灯 (震荡防守)")
 
     return {
         "live_price": live_price, "TREND_BIAS": trend_bias, "BIAS_DESC": bias_desc,
-        "EMA20_1H": round(ema_now, 2), "ATR_1H": round(atr, 2),
+        "EMA20_1H": round(ema20_now, 2), "ATR_1H": round(atr, 2),
         "SBR_TOP": sbr_top, "SBR_BOT": sbr_bot, "SBR_TIME": sbr_time,
         "RBS_TOP": rbs_top, "RBS_BOT": rbs_bot, "RBS_TIME": rbs_time,
         "SBR2_TOP": sbr2_top, "SBR2_BOT": sbr2_bot, "SBR2_TIME": sbr2_time,
