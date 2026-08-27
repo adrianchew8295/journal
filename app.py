@@ -169,10 +169,10 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
 # =====================================================================
 def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     trades = []
-    if p is None or df_5m is None: return trades
+    if p is None or df_5m is None: return trades, None
 
     day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=3)) & (df_5m.index <= window_end_ny)].copy()
-    if len(day_5m) < 25: return trades
+    if len(day_5m) < 25: return trades, None
 
     weights = np.arange(1, 21)
     day_5m["LWMA20"] = day_5m["Close"].rolling(20).apply(lambda prices: np.dot(prices, weights) / weights.sum(), raw=True)
@@ -290,16 +290,16 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                 sl_p = c - sl_dist
                 tp_p = c + tp_dist
                 entry_time_ny = cur_t_ny + timedelta(minutes=5)
-                futu_signal_tag = "▲▲ 2B" if is_b2b else "▲ CALL"
+                futu_signal_tag = "▲▲ 2B 多" if is_b2b else "▲ CALL 多"
             elif is_s2b or is_sstd:
                 in_pos, pos_type = True, -1
                 entry_p = c
                 sl_p = c + sl_dist
                 tp_p = c - tp_dist
                 entry_time_ny = cur_t_ny + timedelta(minutes=5)
-                futu_signal_tag = "▼▼ 2B" if is_s2b else "▼ PUT"
+                futu_signal_tag = "▼▼ 2B 空" if is_s2b else "▼ PUT 空"
 
-    return trades
+    return trades, day_5m
 
 # =====================================================================
 # 5. 账本存储
@@ -368,7 +368,7 @@ with s4:
             else: st.success("自检通过：接口正常。")
 
 st.markdown("---")
-tab1, tab2, tab3 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历与复盘图", "⚡ 当天 5M 实时执行座舱 (0.5 ATR)"])
+tab1, tab2, tab3 = st.tabs(["🎯 QQQ 战区座舱 (13行富途参数复制)", "📅 QQQ 2B同频月历账本", "⚡ 昨夜 22:00-24:00 信号核验与 5M 战场 (0.5 ATR)"])
 
 with tab1:
     st.subheader("🎯 QQQ 5M 战区座舱 (含 SBR/SBR2/RBS/RBS2 & 2B)")
@@ -415,7 +415,7 @@ with tab1:
                 st.code("\n".join(out_lines), language="pascal")
 
 with tab2:
-    st.subheader("📅 QQQ 2B 同频月历与执行细节")
+    st.subheader("📅 QQQ 2B 同频月历账本 (22:00 - 24:00 MYT)")
     col_btn1, col_btn2, col_btn3 = st.columns([1.5, 2, 1.5])
     with col_btn1:
         if st.button("🛠️ 结算昨夜 22:00-24:00 账本"):
@@ -427,7 +427,7 @@ with tab2:
                 window_end_ny = cutoff_ny + timedelta(hours=2)
                 p = compute_futu_13_params(d1h, d5m, cutoff_ny)
                 if p:
-                    trades = simulate_trades_with_2b(d5m, p, cutoff_ny, window_end_ny)
+                    trades, _ = simulate_trades_with_2b(d5m, p, cutoff_ny, window_end_ny)
                     ok, msg = append_to_journal(target_d.strftime("%Y-%m-%d"), p, trades)
                     if ok: st.success(msg); st.rerun()
                     else: st.warning(msg)
@@ -445,7 +445,7 @@ with tab2:
                         window_end_ny = cutoff_ny + timedelta(hours=2)
                         p_day = compute_futu_13_params(d1h, d5m, cutoff_ny)
                         if p_day:
-                            trades_day = simulate_trades_with_2b(d5m, p_day, cutoff_ny, window_end_ny)
+                            trades_day, _ = simulate_trades_with_2b(d5m, p_day, cutoff_ny, window_end_ny)
                             ok, _ = append_to_journal(d.strftime("%Y-%m-%d"), p_day, trades_day)
                             if ok: added_cnt += 1
                     st.success(f"🎉 回溯完成，新增 {added_cnt} 个交易日记录！")
@@ -519,165 +519,114 @@ with tab2:
                     else:
                         st.markdown(f"<div style='background-color:#ffffff; border-radius:8px; padding:8px; height:120px; border:1px solid #edf2f7; text-align:center;'><div style='font-size:13px; color:#cbd5e0; text-align:left;'><b>{day}</b></div><div style='font-size:11px; color:#cbd5e0; margin-top:25px;'>-</div></div>", unsafe_allow_html=True)
 
-    # ---------------- 历史交易日 5M K线逐笔复盘视窗 ----------------
-    st.markdown("---")
-    st.subheader("🔍 历史交易日 5M K线与信号复盘图 (22:00 - 24:00 MYT)")
-
-    recorded_dates = sorted(list(set(df_journal["Date_MYT"].dropna().astype(str).tolist())), reverse=True) if not df_journal.empty else []
-    
-    if recorded_dates:
-        selected_date_str = st.selectbox("选择复盘交易日 (MYT)", options=recorded_dates)
-        
-        # 提取当天的记录
-        day_record = df_journal[df_journal["Date_MYT"] == selected_date_str].iloc[0]
-        # 获取 5M 数据
-        _, df_5m_all, _ = fetch_raw_data_with_retry(period_5m="1mo")
-        
-        if df_5m_all is not None and not df_5m_all.empty:
-            sel_d = pd.to_datetime(selected_date_str).date()
-            dt_start_myt = tz_myt.localize(datetime.datetime.combine(sel_d, datetime.time(21, 30, 0)))
-            dt_end_myt = tz_myt.localize(datetime.datetime.combine(sel_d + timedelta(days=1), datetime.time(0, 15, 0)))
-            start_ny_view = dt_start_myt.astimezone(tz_ny)
-            end_ny_view = dt_end_myt.astimezone(tz_ny)
-            
-            sub_chart = df_5m_all[(df_5m_all.index >= start_ny_view) & (df_5m_all.index <= end_ny_view)].copy()
-            
-            if not sub_chart.empty:
-                # 转换索引时间为 MYT 方便对照
-                sub_chart["MYT_Time"] = sub_chart.index.tz_convert(tz_myt)
-                
-                fig_replay = go.Figure()
-                fig_replay.add_trace(go.Candlestick(
-                    x=sub_chart["MYT_Time"],
-                    open=sub_chart['Open'], high=sub_chart['High'],
-                    low=sub_chart['Low'], close=sub_chart['Close'],
-                    name="5M K线 (MYT)"
-                ))
-                
-                # 标记战区阻力支撑线
-                rbs_top_val = float(day_record.get("RBS_TOP", 0))
-                sbr_bot_val = float(day_record.get("SBR_BOT", 0))
-                if rbs_top_val > 0:
-                    fig_replay.add_hline(y=rbs_top_val, line_dash="dash", line_color="cyan", annotation_text="RBS 支撑顶")
-                if sbr_bot_val > 0:
-                    fig_replay.add_hline(y=sbr_bot_val, line_dash="dash", line_color="magenta", annotation_text="SBR 阻力底")
-
-                # 标记交易信号及入场/平仓线
-                sig_type = str(day_record.get("Signal", "NO_TRADE"))
-                if sig_type != "NO_TRADE" and not pd.isna(day_record.get("Entry_Price")):
-                    ep = float(day_record["Entry_Price"])
-                    xp = float(day_record["Exit_Price"])
-                    sl = float(day_record["SL"])
-                    tp = float(day_record["TP"])
-                    
-                    fig_replay.add_hline(y=ep, line_color="gold", line_width=1.5, annotation_text=f"入场价: {ep}")
-                    fig_replay.add_hline(y=sl, line_dash="dot", line_color="red", annotation_text=f"止损 (0.5 ATR): {sl}")
-                    fig_replay.add_hline(y=tp, line_dash="dot", line_color="green", annotation_text=f"止盈 (1:2): {tp}")
-
-                fig_replay.update_layout(
-                    title=f"{selected_date_str} 交易执行结构 | 信号: {sig_type} | 结果: {day_record.get('Result', '-')}",
-                    xaxis_rangeslider_visible=False,
-                    height=500,
-                    margin=dict(l=10, r=10, t=40, b=10),
-                    template="plotly_dark"
-                )
-                st.plotly_chart(fig_replay, use_container_width=True)
-                
-                # 当天关键数据卡片
-                rc1, rc2, rc3, rc4, rc5 = st.columns(5)
-                rc1.metric("信号类型", sig_type)
-                rc2.metric("入场时间 (MYT)", str(day_record.get("Entry_MYT", "-")))
-                rc3.metric("离场时间 (MYT)", str(day_record.get("Exit_MYT", "-")))
-                rc4.metric("离场原因", str(day_record.get("Reason", "-")))
-                rc5.metric("盈亏点数", f"{float(day_record.get('PnL_Points', 0)):+.2f} pt")
-            else:
-                st.warning("所选日期的 5M K线数据在当前缓冲池中未找到。")
-    else:
-        st.info("暂无历史记录，点击上方【一键回溯补录】或【结算】生成数据后即可在此复盘。")
-
     with st.expander("🔍 展开查看完整明细表 (Full Data Table)"):
         if not df_m.empty: st.dataframe(df_m.drop(columns=["Date_MYT_dt", "Year", "Month"], errors="ignore"), use_container_width=True)
         else: st.info("当月暂无交易明细。")
 
 with tab3:
-    st.subheader("⚡ 当天 5M 实时执行座舱 (0.5 ATR 止损 / 1:2 TP)")
+    st.subheader(f"⚡ 昨夜 ({yesterday_myt_str}) 22:00 - 24:00 信号核验与 5M 战场")
     
-    col_c1, col_c2 = st.columns([1, 3])
-    with col_c1:
-        risk_per_trade = st.number_input("单笔固定风险金额 (USD)", min_value=10.0, value=200.0, step=50.0)
-        if st.button("🔄 刷新 5M 实时数据"):
+    col_t3_btn, _ = st.columns([1.5, 3])
+    with col_t3_btn:
+        if st.button("🔄 重新核验昨夜执行信号"):
             st.cache_data.clear()
             st.rerun()
 
-    _, df_5m_live, _ = fetch_raw_data_with_retry(period_5m="5d")
-    if df_5m_live is not None and not df_5m_live.empty:
-        df_live = df_5m_live.copy()
-        df_live["EMA_9"] = df_live["Close"].ewm(span=9, adjust=False).mean()
-        df_live["EMA_21"] = df_live["Close"].ewm(span=21, adjust=False).mean()
+    d1h, d5m, _ = fetch_raw_data_with_retry(period_5m="5d")
+    
+    if d1h is not None and d5m is not None:
+        target_d = yesterday_d
+        dt_10pm_myt = tz_myt.localize(datetime.datetime.combine(target_d, datetime.time(22, 0, 0)))
+        cutoff_ny = dt_10pm_myt.astimezone(tz_ny)
+        window_end_ny = cutoff_ny + timedelta(hours=2)
         
-        tr_live = np.maximum(df_live["High"] - df_live["Low"], np.maximum((df_live["High"] - df_live["Close"].shift(1)).abs(), (df_live["Low"] - df_live["Close"].shift(1)).abs()))
-        df_live["ATR"] = tr_live.rolling(14).mean()
-        
-        typical_p = (df_live["High"] + df_live["Low"] + df_live["Close"]) / 3
-        df_live["VWAP"] = (typical_p * df_live["Volume"]).cumsum() / df_live["Volume"].cumsum()
+        p = compute_futu_13_params(d1h, d5m, cutoff_ny)
+        if p:
+            trades, day_5m = simulate_trades_with_2b(d5m, p, cutoff_ny, window_end_ny)
+            
+            # 顶部关键参数看板
+            tc1, tc2, tc3, tc4 = st.columns(4)
+            tc1.metric("🚦 昨夜三灯方向", p["BIAS_DESC"])
+            tc2.metric("📈 1H EMA20 战区", f"${p['EMA20_1H']:.2f}")
+            tc3.metric("📊 1H ATR 基准", f"${p['ATR_1H']:.2f}")
+            
+            if trades:
+                t = trades[0]
+                tc4.metric(
+                    "🎯 昨夜战果",
+                    f"{t['Result']} ({t['PnL_Points']:+.2f} pt)",
+                    f"信号: {t['Signal']}"
+                )
+            else:
+                tc4.metric("🎯 昨夜战果", "⚪ 未触发信号", "空仓观望")
 
-        cur_bar = df_live.iloc[-1]
-        prev_bar = df_live.iloc[-2]
-        c_price = float(cur_bar["Close"])
-        c_atr = float(cur_bar["ATR"]) if not np.isnan(cur_bar["ATR"]) else 0.8
-        
-        sl_dist = 0.5 * c_atr
-        tp_dist = 1.0 * c_atr
+            # 交易明细核验表
+            st.markdown("#### 📋 昨夜执行明细核验 (0.5 ATR 止损 / 1:2 止盈)")
+            if trades:
+                t_df = pd.DataFrame(trades)
+                # 过滤掉内部用的 DT 列
+                show_cols = [c for c in t_df.columns if not c.endswith("_DT_NY")]
+                st.table(t_df[show_cols])
+            else:
+                st.info("昨夜 22:00 - 24:00 (MYT) 价格未触及战区准入条件或未形成标准 2B / 吞没形态，按纪律未开仓。")
 
-        long_sl = c_price - sl_dist
-        long_tp = c_price + tp_dist
-        long_shares = int(risk_per_trade / sl_dist) if sl_dist > 0 else 0
+            # 5M 战场 K 线图表与信号标记
+            st.markdown("#### 📊 5M 战场执行结构全景图 (含战区阻力支撑与买卖信号)")
+            
+            # 取窗口期前后 5M K线
+            dt_view_start = dt_10pm_myt - timedelta(minutes=30)
+            dt_view_end = dt_10pm_myt + timedelta(hours=2, minutes=15)
+            start_ny_view = dt_view_start.astimezone(tz_ny)
+            end_ny_view = dt_view_end.astimezone(tz_ny)
+            
+            chart_df = d5m[(d5m.index >= start_ny_view) & (d5m.index <= end_ny_view)].copy()
+            
+            if not chart_df.empty:
+                chart_df["MYT_Time"] = chart_df.index.tz_convert(tz_myt)
+                
+                fig = go.Figure()
+                
+                # 5M K线
+                fig.add_trace(go.Candlestick(
+                    x=chart_df["MYT_Time"],
+                    open=chart_df['Open'], high=chart_df['High'],
+                    low=chart_df['Low'], close=chart_df['Close'],
+                    name="5M K线"
+                ))
+                
+                # 绘制战区线
+                if p["SBR_BOT"] > 0:
+                    fig.add_hline(y=p["SBR_BOT"], line_dash="dash", line_color="#f56565", annotation_text=f"SBR 阻力底: {p['SBR_BOT']:.2f}")
+                if p["RBS_TOP"] > 0:
+                    fig.add_hline(y=p["RBS_TOP"], line_dash="dash", line_color="#48bb78", annotation_text=f"RBS 支撑顶: {p['RBS_TOP']:.2f}")
+                if p["PDH"] > 0:
+                    fig.add_hline(y=p["PDH"], line_dash="dot", line_color="#ed8936", annotation_text=f"昨日高 PDH: {p['PDH']:.2f}")
+                if p["PDL"] > 0:
+                    fig.add_hline(y=p["PDL"], line_dash="dot", line_color="#4299e1", annotation_text=f"昨日低 PDL: {p['PDL']:.2f}")
 
-        short_sl = c_price + sl_dist
-        short_tp = c_price - tp_dist
-        short_shares = int(risk_per_trade / sl_dist) if sl_dist > 0 else 0
+                # 标记交易信号
+                if trades:
+                    tr = trades[0]
+                    ep = tr["Entry_Price"]
+                    xp = tr["Exit_Price"]
+                    sl = tr["SL"]
+                    tp = tr["TP"]
+                    
+                    fig.add_hline(y=ep, line_color="#ecc94b", line_width=2, annotation_text=f"进场金线: {ep}")
+                    fig.add_hline(y=sl, line_dash="dash", line_color="#e53e3e", annotation_text=f"止损 (0.5 ATR): {sl}")
+                    fig.add_hline(y=tp, line_dash="dash", line_color="#38a169", annotation_text=f"目标 TP (1:2): {tp}")
 
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("QQQ 实时价 (5M)", f"${c_price:.2f}", f"{(c_price - prev_bar['Close']):+.2f}")
-        mc2.metric("5M ATR (14)", f"${c_atr:.2f}", f"0.5 ATR = ${sl_dist:.2f}")
-        mc3.metric("多头建议仓位", f"{long_shares} 股", f"总敞口: ${long_shares * c_price:,.0f}")
-        mc4.metric("空头建议仓位", f"{short_shares} 股", f"总敞口: ${short_shares * c_price:,.0f}")
-
-        t_long, t_short = st.columns(2)
-        with t_long:
-            st.markdown("**做多方案 (Long Setup)**")
-            st.table(pd.DataFrame({
-                "指标/参数": ["进场参考价", "止损位 (0.5 ATR)", "止盈位 (1:2 TP)", "单笔止损幅度", "建议买入手数"],
-                "数值": [f"${c_price:.2f}", f"${long_sl:.2f}", f"${long_tp:.2f}", f"-${sl_dist:.2f} ({(sl_dist/c_price)*100:.2f}%)", f"{long_shares} 股"]
-            }))
-        with t_short:
-            st.markdown("**做空方案 (Short Setup)**")
-            st.table(pd.DataFrame({
-                "指标/参数": ["进场参考价", "止损位 (0.5 ATR)", "止盈位 (1:2 TP)", "单笔止损幅度", "建议卖空手数"],
-                "数值": [f"${c_price:.2f}", f"${short_sl:.2f}", f"${short_tp:.2f}", f"+${sl_dist:.2f} ({(sl_dist/c_price)*100:.2f}%)", f"{short_shares} 股"]
-            }))
-
-        plot_df = df_live.tail(60)
-        fig = go.Figure()
-        fig.add_trace(go.Candlestick(
-            x=plot_df.index,
-            open=plot_df['Open'], high=plot_df['High'],
-            low=plot_df['Low'], close=plot_df['Close'],
-            name="5M K线"
-        ))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_9'], line=dict(color='orange', width=1), name="EMA 9"))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['EMA_21'], line=dict(color='blue', width=1), name="EMA 21"))
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['VWAP'], line=dict(color='purple', width=1.5, dash='dot'), name="VWAP"))
-        
-        fig.add_hline(y=long_tp, line_dash="dash", line_color="green", annotation_text="做多目标 TP (1:2)")
-        fig.add_hline(y=long_sl, line_dash="dash", line_color="red", annotation_text="做多止损 SL (0.5 ATR)")
-
-        fig.update_layout(
-            xaxis_rangeslider_visible=False,
-            height=500,
-            margin=dict(l=10, r=10, t=30, b=10),
-            template="plotly_dark"
-        )
-        st.plotly_chart(fig, use_container_width=True)
+                fig.update_layout(
+                    title=f"昨夜 5M 战场回放 | 战区判定与执行核验",
+                    xaxis_rangeslider_visible=False,
+                    height=520,
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    template="plotly_dark"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("暂未获取到昨夜窗口期的 5M K线数据。")
+        else:
+            st.error("计算昨夜 13 行战区参数失败，请检查数据完整性。")
     else:
-        st.warning("暂未获取到 5M 实时数据，请点击刷新重试。")
+        st.warning("正在获取数据，请稍后刷新。")
