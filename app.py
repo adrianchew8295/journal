@@ -164,13 +164,12 @@ def compute_futu_13_params(df_1h, df_5m, as_of_ny_time):
     }
 
 # =====================================================================
-# 4. 100% 完整对齐富途指标 Pascal 逻辑的 5M 回测引擎
+# 4. 100% 完整对齐富途指标 Pascal 逻辑的 5M 回测引擎 (严格收盘入场)
 # =====================================================================
 def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     trades = []
     if p is None or df_5m is None: return trades
 
-    # 预留至少 30 根 K 线计算指标 (LWMA20, ATR14, VOL_MA)
     day_5m = df_5m[(df_5m.index >= start_cutoff_ny - timedelta(hours=3)) & (df_5m.index <= window_end_ny)].copy()
     if len(day_5m) < 25: return trades
 
@@ -208,7 +207,6 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     bull_2b_raw = ((day_5m["Low"] < llv5_ref1) | (day_5m["Low"] < pdl_line) | (day_5m["Low"] < pml_line)) & (day_5m["Close"] > llv5_ref1) & (day_5m["Close"] > day_5m["Open"])
     bear_2b_raw = ((day_5m["High"] > hhv5_ref1) | (day_5m["High"] > pdh_line) | (day_5m["High"] > pmh_line)) & (day_5m["Close"] < hhv5_ref1) & (day_5m["Close"] < day_5m["Open"])
 
-    # 战区标准形态 (吞没 / 晨昏星 / 123)
     bull_engulf_raw = buy_zone & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"].shift(1) < day_5m["Open"].shift(1)) & (day_5m["Close"] >= day_5m["Open"].shift(1)) & (day_5m["Open"] <= day_5m["Close"].shift(1))
     bear_engulf_raw = sell_zone & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"].shift(1) > day_5m["Open"].shift(1)) & (day_5m["Close"] <= day_5m["Open"].shift(1)) & (day_5m["Open"] >= day_5m["Close"].shift(1))
 
@@ -230,7 +228,6 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
     buy_std_confirmed = std_buy_setup.shift(1) & (day_5m["High"] > day_5m["High"].shift(1)) & (day_5m["Close"] > day_5m["Open"]) & (day_5m["Close"] > day_5m["LWMA20"]) & vol_heavy_or_ref1
     sell_std_confirmed = std_sell_setup.shift(1) & (day_5m["Low"] < day_5m["Low"].shift(1)) & (day_5m["Close"] < day_5m["Open"]) & (day_5m["Close"] < day_5m["LWMA20"]) & vol_heavy_or_ref1
 
-    # 防重开信号 (COUNT(CONFIRMED, 5) == 1)
     buy_2b_sig = (bias >= 0) & buy_2b_confirmed & (buy_2b_confirmed.rolling(5).sum() == 1)
     sell_2b_sig = (bias <= 0) & sell_2b_confirmed & (sell_2b_confirmed.rolling(5).sum() == 1)
     buy_std_sig = (bias >= 0) & buy_std_confirmed & (buy_std_confirmed.rolling(5).sum() == 1)
@@ -257,6 +254,9 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
 
         if in_pos:
             exit_flag, reason, exit_p = False, "", 0.0
+            # 平仓确认时间为当前棒收盘时刻 (+5分钟)
+            exit_time_ny = cur_t_ny + timedelta(minutes=5)
+            
             if pos_type == 1:
                 if is_window_close: exit_flag, reason, exit_p = True, "24:00 纪律清仓", c
                 elif l <= sl_p: exit_flag, reason, exit_p = True, "SL (止损)", sl_p
@@ -271,7 +271,7 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
                 trades.append({
                     "Signal": futu_signal_tag,
                     "Entry_MYT": entry_time_ny.astimezone(tz_myt).strftime("%H:%M"), "Entry_ET": entry_time_ny.strftime("%H:%M"),
-                    "Exit_MYT": cur_t_ny.astimezone(tz_myt).strftime("%H:%M"), "Exit_ET": cur_t_ny.strftime("%H:%M"),
+                    "Exit_MYT": exit_time_ny.astimezone(tz_myt).strftime("%H:%M"), "Exit_ET": exit_time_ny.strftime("%H:%M"),
                     "Entry_Price": round(entry_p, 2), "Exit_Price": round(exit_p, 2),
                     "SL": round(sl_p, 2), "TP": round(tp_p, 2), "PnL_Points": round(pnl, 2),
                     "Reason": reason, "Result": "盈利" if pnl > 0 else ("保本" if pnl == 0 else "亏损")
@@ -289,18 +289,18 @@ def simulate_trades_with_2b(df_5m, p, start_cutoff_ny, window_end_ny):
             if is_b2b or is_bstd:
                 in_pos, pos_type = True, 1
                 entry_p = c
-                # 严格对齐 PART 8 止损: LOW - 0.15 * ATR14
                 sl_p = l - 0.15 * atr_v
                 tp_p = c + 2.0 * (c - sl_p)
-                entry_time_ny = cur_t_ny
+                # 严格对齐收盘确认时间点 (+5分钟)
+                entry_time_ny = cur_t_ny + timedelta(minutes=5)
                 futu_signal_tag = "▲▲ 2B" if is_b2b else "▲ CALL"
             elif is_s2b or is_sstd:
                 in_pos, pos_type = True, -1
                 entry_p = c
-                # 严格对齐 PART 8 止损: HIGH + 0.15 * ATR14
                 sl_p = h + 0.15 * atr_v
                 tp_p = c - 2.0 * (sl_p - c)
-                entry_time_ny = cur_t_ny
+                # 严格对齐收盘确认时间点 (+5分钟)
+                entry_time_ny = cur_t_ny + timedelta(minutes=5)
                 futu_signal_tag = "▼▼ 2B" if is_s2b else "▼ PUT"
 
     return trades
